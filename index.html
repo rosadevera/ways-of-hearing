@@ -1,0 +1,111 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Ways of Hearing</title>
+
+  <script src="https://unpkg.com/meyda"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.6.0/p5.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.6.0/addons/p5.sound.min.js"></script>
+
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Fixed Sidebar -->
+  <div id="sidebar" class="sidebar">
+    <!-- Menu Toggle Button -->
+      <div class="sidebar-header">
+          <h1>WAYS OF HEARING</h1>
+          <p class="subtitle">a generative tool</p>
+      </div>
+      
+      <div class="sidebar-content">
+          <div class="control-section">
+              <h3>01 / SOURCE</h3>
+              <div class="control-group">
+                  <label for="audio-upload">Audio File</label>
+                  <div class="file-input-wrapper">
+                      <input type="file" id="audio-upload" accept=".mp3,.wav,.ogg,.m4a" />
+                      <div id="file-name" class="file-name">No file selected</div>
+                  </div>
+              </div>
+          </div>
+
+          <div class="control-section">
+              <h3>02 / GRID</h3>
+              <div class="control-group">
+                  <label for="columns">Columns <span id="column-value">4</span></label>
+                  <input type="range" id="columns" min="1" max="8" value="4">
+              </div>
+              
+              <div class="control-group">
+                  <label for="bpm-input">BPM</label>
+                  <input id="bpm-input" type="number" value="120" min="40" max="240" step="1">
+              </div>
+          </div>
+
+          <div class="control-section">
+              <h3>03 / INSTRUMENT</h3>
+              <div class="control-group">
+                  <label for="category-select">Category</label>
+                  <select id="category-select" class="category-select">
+                      <option value="keys">01 / Keys & Harmonics</option>
+                      <option value="percussion">02 / Drums & Percussion</option>
+                      <option value="wind">03 / Wind & Brass</option>
+                      <option value="strings">04 / Guitar & Strings</option>
+                      <option value="synths">05 / Synthesizers</option>
+                  </select>
+              </div>
+          </div>
+
+          <div class="control-section actions">
+              <button id="analyze-btn" class="primary-btn">Analyze & Generate</button>
+              <div class="button-group">
+                  <button id="pause-btn">Pause</button>
+                  <button id="reset-btn">Reset</button>
+              </div>
+              <button id="download-btn" class="download-btn">Download Composition</button>
+          </div>
+
+          <div id="loading" class="loading-indicator">
+              <div class="spinner"></div>
+              <span>Transcribing audio...</span>
+          </div>
+          <div id="status" class="status-message"></div>
+      </div>
+      
+      <div class="sidebar-footer">
+          <p>thesis project by rosa de vera · wip</p>
+      </div>
+  </div>
+
+  <button id="menu-toggle" class="menu-toggle">
+    <p><</p>
+  </button>
+
+  <!-- Main Canvas Container -->
+  <main id="canvas-container">
+      <!-- p5.js canvas will be inserted here -->
+  </main>
+
+  <script src="sketch.js"></script>
+  
+  <script>
+    // Sidebar toggle functionality
+    document.addEventListener('DOMContentLoaded', function() {
+        const sidebar = document.getElementById('sidebar');
+        const toggleBtn = document.getElementById('menu-toggle');
+        
+        toggleBtn.addEventListener('click', function() {
+            sidebar.classList.toggle('collapsed');
+            toggleBtn.classList.toggle('active');
+            
+            // Call the p5.js function to resize canvas
+            if (window.onSidebarToggle) {
+                window.onSidebarToggle();
+            }
+        });
+    });
+</script>
+</body>
+</html>

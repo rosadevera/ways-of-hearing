@@ -1,0 +1,350 @@
+{
+    "piano": {
+      "family": "keys",
+      "category": "keys_struck",
+      "sustained": true,
+      "elongated": true,
+      "svg": "assets/harmonics/_piano.svg",
+      "anchor": "center"
+    },
+
+    "keyboard": {
+        "family": "keys",
+        "category": "keys_sustained",
+        "sustained": true,
+        "elongated": true,
+        "svg": "assets/harmonics/_keyboard.svg",
+        "anchor": "center"
+    },
+
+    "organ": {
+        "family": "keys",
+        "category": "keys_sustained",
+        "sustained": true,
+        "elongated": true,
+        "svg": "assets/harmonics/_organ.svg",
+        "anchor": "center"
+    },
+
+    "electricorgan": {
+        "family": "keys",
+        "category": "keys_sustained",
+        "sustained": true,
+        "elongated": true,
+        "svg": "assets/harmonics/_electricorgan.svg",
+        "anchor": "center"
+    },
+
+    "rhodes": {
+        "family": "keys",
+        "category": "keys_sustained",
+        "sustained": true,
+        "elongated": true,
+        "svg": "assets/harmonics/_rhodes.svg",
+        "anchor": "center"
+    },
+
+    "yamaha": {
+        "family": "keys",
+        "category": "keys_sustained",
+        "sustained": true,
+        "elongated": true,
+        "svg": "assets/harmonics/_yamaha.svg",
+        "anchor": "center"
+    },
+
+    "mellotron": {
+        "family": "keys",
+        "category": "keys_sustained",
+        "sustained": true,
+        "elongated": true,
+        "svg": "assets/harmonics/_mellotron.svg",
+        "anchor": "center"
+    },
+
+  
+    "stylophone": {
+        "family": "keys",
+        "category": "keys_sustained",
+        "sustained": true,
+        "elongated": true,
+        "svg": "assets/harmonics/_stylophone.svg",
+        "anchor": "center"
+    },
+
+    "melodica": {
+        "family": "keys",
+        "category": "keys_freereed",
+        "sustained": true,
+        "elongated": false,
+        "svg": "assets/harmonics/_melodica.svg",
+        "anchor": "center"
+    },
+
+    "xylophone": {
+        "family": "keys",
+        "category": "bar_harmonics",
+        "sustained": true,
+        "elongated": false,
+        "svg": "assets/harmonics/_xylophone.svg",
+        "anchor": "center"
+    },
+
+    "marimba": {
+        "family": "keys",
+        "category": "bar_harmonics",
+        "sustained": true,
+        "elongated": false,
+        "svg": "assets/harmonics/_marimba.svg",
+        "anchor": "center"
+    },
+    
+    "glockenspiel": {
+        "family": "keys",
+        "category": "bar_harmonics",
+        "sustained": true,
+        "elongated": false,
+        "svg": "assets/harmonics/_glockenspiel.svg",
+        "anchor": "center"
+    },
+
+    "tubularbells": {
+        "family": "keys",
+        "category": "bar_harmonics",
+        "sustained": true,
+        "elongated": false,
+        "svg": "assets/harmonics/_tubularbells.svg",
+        "anchor": "center"
+    },
+
+    "chime": {
+        "family": "keys",
+        "category": "bar_harmonics",
+        "sustained": true,
+        "elongated": false,
+        "svg": "assets/harmonics/_chime.svg",
+        "anchor": "center"
+    },
+
+    "celesta": {
+        "family": "keys",
+        "category": "bar_harmonics",
+        "sustained": true,
+        "elongated": false,
+        "svg": "assets/harmonics/_celesta.svg",
+        "anchor": "center"
+    },
+  
+
+
+    "kick": {
+        "family": "percussion",
+        "category": "percussion_skin",
+        "sustained": false,
+        "svg": "assets/percussion/_kick.svg",
+        "anchor": "center"
+    },
+
+    "snare": {
+        "family": "percussion",
+        "category": "percussion_skin",
+        "sustained": false,
+        "svg": "assets/percussion/_snare.svg",
+        "anchor": "center"
+    },
+  
+      
+    "toms": {
+        "family": "percussion",
+        "category": "percussion_skin",
+        "sustained": false,
+        "svg": "assets/percussion/_toms.svg",
+        "anchor": "center"
+    },
+
+    "bassdrum": {
+        "family": "percussion",
+        "category": "percussion_skin",
+        "sustained": false,
+        "svg": "assets/percussion/_bass_drum.svg",
+        "anchor": "center"
+    },
+
+    "hihat": {
+        "family": "percussion",
+        "category": "noise_bursts",
+        "sustained": false,
+        "svg": "assets/percussion/_hi_hat.svg",
+        "anchor": "center"
+    },
+
+    "crashsplash": {
+        "family": "percussion",
+        "category": "noise_bursts",
+        "sustained": false,
+        "svg": "assets/percussion/_crash_splash.svg",
+        "anchor": "center"
+    },
+
+    "tambourine": {
+        "family": "percussion",
+        "category": "noise_bursts",
+        "sustained": false,
+        "svg": "assets/percussion/_tambourine.svg",
+        "anchor": "center"
+    },
+
+    "clap": {
+        "family": "percussion",
+        "category": "noise_bursts",
+        "sustained": false,
+        "svg": "assets/percussion/_clap.svg",
+        "anchor": "center"
+    },
+    
+  
+
+    "flute": {
+        "family": "wind",
+        "category": "edge_blown",
+        "sustained": true,
+        "elongated": true,
+        "svg": "assets/wind/_flute.svg",
+        "anchor": "center"
+    },
+
+    "piccolo": {
+        "family": "wind",
+        "category": "edge_blown",
+        "sustained": true,
+        "elongated": true,
+        "svg": "assets/wind/_piccolo.svg",
+        "anchor": "center"
+    },
+
+    "recorder": {
+        "family": "wind",
+        "category": "edge_blown",
+        "sustained": true,
+        "elongated": true,
+        "svg": "assets/wind/_recorder.svg",
+        "anchor": "center"
+    },
+
+    "whistle": {
+        "family": "wind",
+        "category": "edge_blown",
+        "sustained": true,
+        "elongated": true,
+        "svg": "assets/wind/_whistle.svg",
+        "anchor": "center"
+    },
+
+    "clarinet": {
+        "family": "wind",
+        "category": "reed",
+        "sustained": true,
+        "elongated": true,
+        "svg": "assets/wind/_clarinet.svg",
+        "anchor": "center"
+    },
+
+    "oboe": {
+        "family": "wind",
+        "category": "reed",
+        "sustained": true,
+        "elongated": true,
+        "svg": "assets/wind/_oboe.svg",
+        "anchor": "center"
+    },
+
+    "bassoon": {
+        "family": "wind",
+        "category": "reed",
+        "sustained": true,
+        "elongated": true,
+        "svg": "assets/wind/_bassoon.svg",
+        "anchor": "center"
+    },
+
+    "trumpet": {
+        "family": "wind",
+        "category": "lip_blown",
+        "sustained": true,
+        "elongated": true,
+        "svg": "assets/wind/_trumpet.svg",
+        "anchor": "center"
+    },
+
+
+    "acousticguitar": {
+        "family": "strings",
+        "category": "plucked_lutes",
+        "sustained": true,
+        "elongated": true,
+        "svg": "assets/strings/_acoustic_guitar.svg",
+        "anchor": "horizontal"
+    },
+
+    "electricguitar": {
+        "family": "strings",
+        "category": "plucked_lutes",
+        "sustained": true,
+        "elongated": true,
+        "svg": "assets/strings/_electric_guitar.svg",
+        "anchor": "horizontal"
+    },
+
+    "bass": {
+        "family": "strings",
+        "category": "plucked_lutes",
+        "sustained": true,
+        "elongated": true,
+        "svg": "assets/strings/_bass.svg",
+        "anchor": "horizontal"
+    },
+
+    "violin": {
+        "family": "strings",
+        "category": "strings_bowed",
+        "sustained": true,
+        "elongated": true,
+        "svg": "assets/strings/_violin.svg",
+        "anchor": "horizontal"
+    },
+
+    "viola": {
+        "family": "strings",
+        "category": "strings_bowed",
+        "sustained": true,
+        "elongated": true,
+        "svg": "assets/strings/_viola.svg",
+        "anchor": "horizontal"
+    },
+
+    "cello": {
+        "family": "strings",
+        "category": "strings_bowed",
+        "sustained": true,
+        "elongated": true,
+        "svg": "assets/strings/_cello.svg",
+        "anchor": "horizontal"
+    },
+
+    "electricbass": {
+        "family": "strings",
+        "category": "strings_electrified",
+        "sustained": true,
+        "elongated": true,
+        "svg": "assets/strings/_electric_bass.svg",
+        "anchor": "horizontal"
+    },
+
+    
+
+    "synth": {
+      "category": "synth",
+      "gradient": true
+    }
+  }
+  

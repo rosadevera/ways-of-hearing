@@ -11,7 +11,7 @@ const INSTRUMENTS_BY_CATEGORY = {
   wind: ['flute', 'piccolo', 'recorder', 'whistle', 'clarinet', 'oboe', 'bassoon', 'trumpet'],
   strings: ['acousticguitar', 'electricguitar', 'bass', 'electricbass', 'violin', 'viola', 'cello'],
   synths: ['synth', 'pad', 'lead', 'bass_synth', 'arpeggio']
-};
+}; 
 
 const DEFAULT_INSTRUMENTS = {
   keys: 'piano',

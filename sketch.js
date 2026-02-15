@@ -46,6 +46,7 @@ let source = null;
 let audioBuffer = null;
 let meydaAnalyzer = null;
 let startTime = 0;
+let timeDomainBuffer = null;
 
 // BPM guard — prevents setupAudioPlayback() from overwriting user's BPM
 let userHasSetBPM = false;
@@ -66,33 +67,30 @@ let beatClockTimer    = null;  // cancelable handle
 let beatClockPlayedSeconds = 0;  // total seconds played before the current segment
 // ──────────────────────────────────────────────────────────────────────────
 
-function startBeatClock() {
-  stopBeatClock();
-  beatClockStep  = 60000 / BPM;
-  beatClockStart = performance.now();
-  beatClockTime  = 0;
+let playbackStartAudioTime = 0;   // audioContext.currentTime when current segment started
+let playedOffsetSeconds    = 0;   // seconds already played before current segment
 
-  function tick() {
-    if (!isPlaying) return;
-    beatClockTime += beatClockStep;
-    const drift = (performance.now() - beatClockStart) - beatClockTime;
-    beatClockTimer = setTimeout(tick, Math.max(0, beatClockStep - drift));
-  }
-  beatClockTimer = setTimeout(tick, beatClockStep);
+function getSongTime() {
+  if (!audioContext) return 0;
+  if (!isPlaying) return playedOffsetSeconds;
+  return playedOffsetSeconds + (audioContext.currentTime - playbackStartAudioTime);
 }
 
-function stopBeatClock() {
-  if (beatClockTimer !== null) { clearTimeout(beatClockTimer); beatClockTimer = null; }
+function resetSongClock() {
+  playedOffsetSeconds = 0;
+  playbackStartAudioTime = audioContext ? audioContext.currentTime : 0;
+}
 
-  // ── MEASURE FIX 3 ────────────────────────────────────────────────────────
-  // When we stop (pause or reset), bank how many seconds we've played
-  // so the next startBeatClock() segment continues from the right position.
-  if (beatClockStart !== null) {
-    beatClockPlayedSeconds += (performance.now() - beatClockStart) / 1000;
-    beatClockStart = null;
-  }
+function pauseSongClock() {
+  if (!audioContext) return;
+  playedOffsetSeconds = getSongTime();
+}
+
+function resumeSongClock() {
+  if (!audioContext) return;
+  playbackStartAudioTime = audioContext.currentTime;
+}
   // ────────────────────────────────────────────────────────────────────────
-}
 
 function getAccurateBeatTime() {
   // Total play-time = seconds banked from previous segments
@@ -378,6 +376,8 @@ function setupAudioPlayback() {
   analyser.fftSize = 2048;
   analyser.smoothingTimeConstant = 0.8;
 
+  timeDomainBuffer = new Uint8Array(analyser.fftSize);
+
   source.connect(analyser);
   analyser.connect(audioContext.destination);
 
@@ -396,17 +396,35 @@ function setupAudioPlayback() {
       bufferSize: 512,
       featureExtractors: getFeaturesForCategory(currentCategory),
       callback: (features) => {
-        if (isPlaying && features) processAudioFeatures(features);
+        if (!isPlaying || !features) return;
+      
+        // Detect pitch only for pitched instruments
+        let fundamentalHz = null;
+      
+        if (
+          currentCategory === 'keys' ||
+          currentCategory === 'strings' ||
+          currentCategory === 'wind' ||
+          currentCategory === 'synths'
+        ) {
+          if (analyser && timeDomainBuffer) {
+            analyser.getByteTimeDomainData(timeDomainBuffer);
+            fundamentalHz = autoCorrelatePitch(
+              timeDomainBuffer,
+              audioContext.sampleRate
+            );
+          }
+        }
+      
+        processAudioFeatures(features, fundamentalHz);
       }
     });
+
 
     meydaAnalyzer.start();
     startTime = audioContext.currentTime;
 
-    // ── MEASURE FIX 5 ────────────────────────────────────────────────────
-    // Reset the banked play-time on a fresh analyze (not on resume)
-    beatClockPlayedSeconds = 0;
-    // ────────────────────────────────────────────────────────────────────
+    resetSongClock();
 
     source.start(0);
     isPlaying   = true;
@@ -426,6 +444,8 @@ function setupAudioPlayback() {
     isAnalyzing = false;
   }
 }
+
+
 
 function getFeaturesForCategory(category) {
   const baseFeatures = ['rms', 'amplitudeSpectrum'];
@@ -447,15 +467,17 @@ function getFeaturesForCategory(category) {
 // CATEGORY-SPECIFIC PROCESSING
 // ----------------------------------------------------
 
-function processAudioFeatures(features) {
+function processAudioFeatures(features, fundamentalHz) {
   if (!isPlaying || !features) return;
 
-  const currentTime   = getAccurateBeatTime();
+  const currentTime = getSongTime();
   const measureIndex  = Math.floor(currentTime / measureDuration);
-  const timeInMeasure = currentTime % measureDuration;
-  const sliceIndex    = constrain(
-    Math.floor(map(timeInMeasure, 0, measureDuration, 0, SUBDIVISIONS)),
-    0, SUBDIVISIONS - 1
+  const timeInMeasure = currentTime - measureIndex * measureDuration;
+
+  // Quantize time into SUBDIVISIONS of the measure
+  const sliceIndex = Math.min(
+    SUBDIVISIONS - 1,
+    Math.max(0, Math.floor((timeInMeasure / measureDuration) * SUBDIVISIONS))
   );
 
   if (!measureBuffers[measureIndex]) {
@@ -463,7 +485,8 @@ function processAudioFeatures(features) {
     for (let i = 0; i < SUBDIVISIONS; i++) {
       measureBuffers[measureIndex][i] = {
         rms: [], centroid: [], chroma: [],
-        rolloff: [], zcr: [], perceptualSharpness: [], flux: []
+        rolloff: [], zcr: [], perceptualSharpness: [], flux: [],
+        pitchHz: []
       };
     }
   }
@@ -476,6 +499,7 @@ function processAudioFeatures(features) {
   if (features.chroma)            slice.chroma.push(features.chroma);
   if (features.zcr)               slice.zcr.push(features.zcr);
   if (features.perceptualSharpness) slice.perceptualSharpness.push(features.perceptualSharpness);
+  if (fundamentalHz) slice.pitchHz.push(fundamentalHz);
 
   if (features.amplitudeSpectrum) {
     if (previousSpectrum) {
@@ -516,23 +540,29 @@ function generateMeasureFromBuffer(measureIndex) {
     const avgZCR      = average(slice.zcr);
     const avgFlux     = average(slice.flux);
     const avgSharpness= average(slice.perceptualSharpness);
+    const avgPitchHz  = average(slice.pitchHz);
 
     switch (currentCategory) {
       case 'keys':
-        processKeysCategory(notes, s, avgRMS, avgCentroid, avgFlux, slice.chroma);
+        processKeysCategory(notes, s, avgRMS, avgCentroid, avgFlux, slice.chroma, avgPitchHz);
         break;
-      case 'percussion':
-        processPercussionCategory(notes, s, avgRMS, avgZCR, avgFlux, avgRolloff);
-        break;
-      case 'wind':
-        processWindCategory(notes, s, avgRMS, avgCentroid, avgFlux, slice.chroma);
-        break;
-      case 'strings':
-        processStringsCategory(notes, s, avgRMS, avgCentroid, avgFlux, avgZCR, slice.chroma);
-        break;
-      case 'synths':
-        processSynthsCategory(notes, s, avgRMS, avgCentroid, avgSharpness, avgFlux, slice.chroma);
-        break;
+
+        case 'percussion':
+          // percussion doesn't use pitch, but FIX centroid bug by passing it
+          processPercussionCategory(notes, s, avgRMS, avgZCR, avgFlux, avgRolloff, avgCentroid);
+          break;
+      
+        case 'wind':
+          processWindCategory(notes, s, avgRMS, avgCentroid, avgFlux, slice.chroma, avgPitchHz);
+          break;
+      
+        case 'strings':
+          processStringsCategory(notes, s, avgRMS, avgCentroid, avgFlux, avgZCR, slice.chroma, avgPitchHz);
+          break;
+      
+        case 'synths':
+          processSynthsCategory(notes, s, avgRMS, avgCentroid, avgSharpness, avgFlux, slice.chroma, avgPitchHz);
+          break;      
     }
   }
 
@@ -543,44 +573,55 @@ function generateMeasureFromBuffer(measureIndex) {
 // CATEGORY PROCESSING
 // ----------------------------------------------------
 
-function processKeysCategory(notes, sliceIndex, rms, centroid, flux, chromaArray) {
-  if (!chromaArray || chromaArray.length === 0) return;
-  const chromaAvg = averageChroma(chromaArray);
-  
-  // Determine more specific keyboard instrument based on frequency
+function processKeysCategory(notes, sliceIndex, rms, centroid, flux, chromaArray, pitchHz) {
+  // Prefer real pitch if available; fallback to chroma
+  let pitchClass = null, octave = null, yNorm = null;
+
+  if (pitchHz) {
+    const midi = freqToMidi(pitchHz);
+    pitchClass = midiToPitchClass(midi);
+    octave = midiToOctave(midi);
+    yNorm = freqToYNorm(pitchHz);
+  } else if (chromaArray && chromaArray.length) {
+    const chromaAvg = averageChroma(chromaArray);
+    const i = chromaAvg.indexOf(Math.max(...chromaAvg));
+    pitchClass = indexToPitch(i);
+    octave = mapToOctave(centroid);
+    yNorm = map(i, 0, 11, 0.85, 0.15);
+  } else {
+    return;
+  }
+
   let instrument = 'piano';
-  if (centroid < 400) {
-    instrument = 'electricorgan';
-  } else if (centroid > 2000) {
-    instrument = 'xylophone';
-  }
-  
-  for (let i = 0; i < 12; i++) {
-    if (chromaAvg[i] > 0.25) {
-      notes.push({
-        instrument: mapInstrumentName(instrument, 'keys'), // ← ADD THIS
-        pitchClass: indexToPitch(i),
-        octave: mapToOctave(centroid),
-        yPosition: map(i, 0, 11, 0.85, 0.15),
-        slice: sliceIndex,
-        isSustained: rms > 0.01 && flux < 0.05,
-        confidence: chromaAvg[i]
-      });
-    }
-  }
+  if (centroid < 400) instrument = 'electricorgan';
+  else if (centroid > 2000) instrument = 'xylophone';
+
+  // Only emit if the note seems “present”
+  const confident = rms > 0.008 && flux < 10;
+  if (!confident) return;
+
+  notes.push({
+    instrument: mapInstrumentName(instrument, 'keys'),
+    pitchClass,
+    octave,
+    yPosition: yNorm,
+    slice: sliceIndex,
+    isSustained: rms > 0.01 && flux < 0.05,
+    confidence: 1
+  });
 }
 
-function processPercussionCategory(notes, sliceIndex, rms, zcr, flux, rolloff) {
+function processPercussionCategory(notes, sliceIndex, rms, zcr, flux, rolloff, avgCentroid) {
   if (rms < 0.02) return;
-  
+
   let instrument = 'percussion';
   let yPos = 0.5;
-  
+
   if (zcr > 0.15 && flux > 8) {
     instrument = 'snare';
     yPos = 0.6;
-  } else if (rms > 0.08 && centroid < 200) { // Need to pass centroid!
-    instrument = 'bassdrum';  // Changed from 'kick'
+  } else if (rms > 0.08 && centroid < 200) {
+    instrument = 'bassdrum';
     yPos = 0.9;
   } else if (zcr > 0.1 && flux > 5) {
     instrument = 'hihat';
@@ -589,70 +630,112 @@ function processPercussionCategory(notes, sliceIndex, rms, zcr, flux, rolloff) {
     instrument = 'tambourine';
     yPos = 0.3;
   }
-  
+
   notes.push({
-    instrument: mapInstrumentName(instrument, 'percussion'), // ← ADD THIS
+    instrument: mapInstrumentName(instrument, 'percussion'),
     yPosition: yPos,
     slice: sliceIndex,
     intensity: rms
   });
 }
 
-function processStringsCategory(notes, sliceIndex, rms, centroid, flux, zcr, chromaArray) {
-  if (rms < 0.008) return;
-  const chromaAvg = averageChroma(chromaArray);
-  const pitch = dominantPitch(chromaAvg);
-  
-  let instrument = 'violin';
-  let yPos;
-  
-  if (centroid < 400) {
-    instrument = 'electricbass';  // or 'bass' for acoustic
-    yPos = 0.85;
-  } else if (centroid < 800) {
-    instrument = 'cello';
-    yPos = 0.65;
-  } else {
-    // Detect if electric or acoustic guitar
-    instrument = zcr > 0.15 ? 'electricguitar' : 'acousticguitar';
-    yPos = map(centroid, 800, 3000, 0.45, 0.2, true);
+function processWindCategory(notes, sliceIndex, rms, centroid, flux, chromaArray, pitchHz) {
+  if (rms < 0.006) return;
+
+  let pitchClass = null, octave = null, yNorm = null;
+
+  // Prefer real detected pitch
+  if (pitchHz) {
+    const midi = freqToMidi(pitchHz);
+    pitchClass = midiToPitchClass(midi);
+    octave = midiToOctave(midi);
+    yNorm = freqToYNorm(pitchHz);
   }
-  
+  // fallback to chroma
+  else if (chromaArray && chromaArray.length) {
+    const chromaAvg = averageChroma(chromaArray);
+    pitchClass = dominantPitch(chromaAvg);
+    octave = mapToOctave(centroid);
+    yNorm = map(centroid, 200, 4000, 0.85, 0.15, true);
+  } else return;
+
+  const instrument = centroid > 1200 ? 'trumpet' : 'flute';
+
   notes.push({
-    instrument: mapInstrumentName(instrument, 'strings'), // ← ADD THIS
-    pitchClass: pitch,
-    octave: mapToOctave(centroid),
-    yPosition: yPos,
+    instrument: mapInstrumentName(instrument, 'wind'),
+    pitchClass,
+    octave,
+    yPosition: yNorm,
+    slice: sliceIndex,
+    isSustained: flux < 0.03
+  });
+}
+
+function processStringsCategory(notes, sliceIndex, rms, centroid, flux, zcr, chromaArray, pitchHz) {
+  if (rms < 0.008) return;
+
+  let pitchClass = null, octave = null, yNorm = null;
+
+  if (pitchHz) {
+    const midi = freqToMidi(pitchHz);
+    pitchClass = midiToPitchClass(midi);
+    octave = midiToOctave(midi);
+    yNorm = freqToYNorm(pitchHz);
+  } else if (chromaArray && chromaArray.length) {
+    const chromaAvg = averageChroma(chromaArray);
+    pitchClass = dominantPitch(chromaAvg);
+    octave = mapToOctave(centroid);
+    yNorm = map(centroid, 200, 4000, 0.85, 0.15, true);
+  } else {
+    return;
+  }
+
+  // Instrument selection
+  let instrument = 'violin';
+  if (centroid < 400) instrument = 'electricbass';
+  else if (centroid < 800) instrument = 'cello';
+  else instrument = (zcr > 0.15 ? 'electricguitar' : 'acousticguitar');
+
+  notes.push({
+    instrument: mapInstrumentName(instrument, 'strings'),
+    pitchClass,
+    octave,
+    yPosition: yNorm,
     slice: sliceIndex,
     isSustained: flux < 0.02,
     plucked: zcr > 0.12
   });
 }
 
-function processStringsCategory(notes, sliceIndex, rms, centroid, flux, zcr, chromaArray) {
-  if (rms < 0.008) return;
-  const chromaAvg  = averageChroma(chromaArray);
-  const pitch      = dominantPitch(chromaAvg);
-  let instrument   = 'violin', yPos;
-  if (centroid < 400)      { instrument = 'bass';   yPos = 0.85; }
-  else if (centroid < 800) { instrument = 'cello';  yPos = 0.65; }
-  else                     { instrument = 'violin'; yPos = map(centroid, 800, 3000, 0.45, 0.2, true); }
-  notes.push({
-    instrument, pitchClass: pitch, octave: mapToOctave(centroid),
-    yPosition: yPos, slice: sliceIndex,
-    isSustained: flux < 0.02, plucked: zcr > 0.12
-  });
-}
-
-function processSynthsCategory(notes, sliceIndex, rms, centroid, sharpness, flux, chromaArray) {
+function processSynthsCategory(notes, sliceIndex, rms, centroid, sharpness, flux, chromaArray, pitchHz) {
   if (rms < 0.005) return;
-  const chromaAvg = averageChroma(chromaArray);
-  const pitch     = dominantPitch(chromaAvg);
-  const synthType = sharpness > 2.5 ? 'lead' : centroid < 400 ? 'bass_synth' : flux < 0.01 ? 'pad' : 'synth';
+
+  const synthType = (sharpness > 2.5) ? 'lead'
+    : (centroid < 400) ? 'bass_synth'
+    : (flux < 0.01) ? 'pad'
+    : 'synth';
+
+  let yNorm = map(centroid, 200, 4000, 0.85, 0.15, true);
+  let pitchClass = 'C', octave = mapToOctave(centroid);
+
+  if (pitchHz) {
+    const midi = freqToMidi(pitchHz);
+    pitchClass = midiToPitchClass(midi);
+    octave = midiToOctave(midi);
+    yNorm = freqToYNorm(pitchHz);
+  } else if (chromaArray && chromaArray.length) {
+    const chromaAvg = averageChroma(chromaArray);
+    pitchClass = dominantPitch(chromaAvg);
+  }
+
   notes.push({
-    instrument: synthType, pitchClass: pitch, octave: mapToOctave(centroid),
-    yPosition: map(centroid, 200, 4000, 0.85, 0.15, true),
-    slice: sliceIndex, isSustained: flux < 0.02, intensity: sharpness || 1
+    instrument: synthType,
+    pitchClass,
+    octave,
+    yPosition: yNorm,
+    slice: sliceIndex,
+    isSustained: flux < 0.02,
+    intensity: sharpness || 1
   });
 }
 
@@ -747,17 +830,26 @@ function estimateBPM(duration) {
 
 function togglePause() {
   if (!source || !audioContext) return;
+
   if (isPlaying) {
     audioContext.suspend();
-    stopBeatClock();  // banks elapsed seconds before pausing
+
+    // Save how many seconds have already played
+    pauseSongClock();
+
     isPlaying = false;
-    if (statusDiv)   statusDiv.textContent = 'Paused';
+    if (statusDiv) statusDiv.textContent = 'Paused';
     if (pauseButton) pauseButton.textContent = 'Resume';
+
   } else {
     audioContext.resume();
-    startBeatClock(); // continues from banked position
+
+    // Resume timing from the same position
+    resumeSongClock();
+
     isPlaying = true;
-    if (statusDiv)   statusDiv.textContent = `Transcribing ${getCategoryName(currentCategory)} at ${BPM} BPM`;
+    if (statusDiv) statusDiv.textContent =
+    `Transcribing ${getCategoryName(currentCategory)} at ${BPM} BPM`;
     if (pauseButton) pauseButton.textContent = 'Pause';
   }
 }
@@ -767,8 +859,8 @@ function resetComposition() {
   measureBuffers      = [];
   currentMeasureIndex = 0;
 
-  stopBeatClock();
-  beatClockPlayedSeconds = 0;  // fully reset banked time on reset
+  resetSongClock();
+
   userHasSetBPM = false;
 
   if (source)        { source.stop(); source.disconnect(); }
@@ -790,6 +882,96 @@ function downloadComposition() {
   saveCanvas();
   if (statusDiv) statusDiv.textContent = 'Composition downloaded';
 }
+
+// ── PITCH DETECTION (autocorrelation) ──────────────────────────────────────
+// Returns fundamental frequency in Hz or null if unclear/noisy.
+function autoCorrelatePitch(timeDomainData, sampleRate) {
+  // Convert to float [-1..1]
+  const buf = new Float32Array(timeDomainData.length);
+  for (let i = 0; i < timeDomainData.length; i++) {
+    buf[i] = (timeDomainData[i] - 128) / 128;
+  }
+
+  // RMS gate (ignore silence)
+  let rms = 0;
+  for (let i = 0; i < buf.length; i++) rms += buf[i] * buf[i];
+  rms = Math.sqrt(rms / buf.length);
+  if (rms < 0.01) return null;
+
+  // Trim edges where signal is tiny
+  let r1 = 0, r2 = buf.length - 1;
+  const thresh = 0.2;
+  for (let i = 0; i < buf.length / 2; i++) {
+    if (Math.abs(buf[i]) < thresh) { r1 = i; break; }
+  }
+  for (let i = 1; i < buf.length / 2; i++) {
+    if (Math.abs(buf[buf.length - i]) < thresh) { r2 = buf.length - i; break; }
+  }
+
+  const trimmed = buf.slice(r1, r2);
+  const size = trimmed.length;
+  if (size < 32) return null;
+
+  // Autocorrelation
+  const c = new Float32Array(size).fill(0);
+  for (let lag = 0; lag < size; lag++) {
+    let sum = 0;
+    for (let i = 0; i < size - lag; i++) sum += trimmed[i] * trimmed[i + lag];
+    c[lag] = sum;
+  }
+
+  // Find first dip
+  let d = 0;
+  while (d < size - 1 && c[d] > c[d + 1]) d++;
+
+  // Find peak after dip
+  let maxval = -1, maxpos = -1;
+  for (let lag = d; lag < size; lag++) {
+    if (c[lag] > maxval) { maxval = c[lag]; maxpos = lag; }
+  }
+  if (maxpos <= 0) return null;
+
+  // Parabolic interpolation for better precision
+  const x1 = maxpos - 1;
+  const x2 = maxpos;
+  const x3 = maxpos + 1;
+  if (x3 < c.length) {
+    const y1 = c[x1], y2 = c[x2], y3 = c[x3];
+    const a = (y1 + y3 - 2 * y2) / 2;
+    const b = (y3 - y1) / 2;
+    if (a !== 0) {
+      const shift = -b / (2 * a);
+      const betterLag = x2 + shift;
+      return sampleRate / betterLag;
+    }
+  }
+
+  return sampleRate / maxpos;
+}
+
+function freqToMidi(freq) {
+  return 69 + 12 * Math.log2(freq / 440);
+}
+
+function midiToPitchClass(midi) {
+  const names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+  const idx = ((Math.round(midi) % 12) + 12) % 12;
+  return names[idx];
+}
+
+function midiToOctave(midi) {
+  return Math.floor(Math.round(midi) / 12) - 1;
+}
+
+// Log-mapped Y (higher freq = higher position)
+function freqToYNorm(freq) {
+  const fMin = 80;     // ~E2
+  const fMax = 1200;   // ~D6
+  const f = Math.max(fMin, Math.min(fMax, freq));
+  const t = (Math.log(f) - Math.log(fMin)) / (Math.log(fMax) - Math.log(fMin));
+  return 1 - t; // 0 top, 1 bottom in normalized terms
+}
+// ───────────────────────────────────────────────────────────────────────────
 
 // ----------------------------------------------------
 // DRAW FUNCTIONS

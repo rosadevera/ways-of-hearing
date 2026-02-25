@@ -106,7 +106,7 @@ let categorySelect;
 let currentCategory = 'keys';
 
 // UI Elements
-let audioFileInput, analyzeButton, resetButton, pauseButton, downloadButton;
+let audioFileInput, analyzeButton, addLayerButton, resetButton, pauseButton, downloadButton;
 let columnsSlider, columnValueSpan, statusDiv, loadingDiv, fileNameDiv;
 
 // Temporal accumulation
@@ -304,8 +304,11 @@ function setupAudioControls() {
 
   if (statusDiv) statusDiv.textContent = 'Ready to upload audio';
   if (audioFileInput) audioFileInput.addEventListener('change', handleFileSelect);
-  if (analyzeButton)  analyzeButton.addEventListener('click', analyzeAudio);
-  if (resetButton)    resetButton.addEventListener('click', resetComposition);
+  addLayerButton = document.getElementById('add-layer-btn');
+
+  if (analyzeButton)   analyzeButton.addEventListener('click', startFreshComposition);
+  if (addLayerButton)  addLayerButton.addEventListener('click', addInstrumentLayer);
+  if (resetButton)     resetButton.addEventListener('click', resetComposition);
   if (pauseButton)    pauseButton.addEventListener('click', togglePause);
   if (downloadButton) downloadButton.addEventListener('click', downloadComposition);
   if (columnsSlider)  { columnsSlider.addEventListener('input', updateColumns); updateColumns(); }
@@ -339,49 +342,92 @@ function handleFileSelect(e) {
   }
 }
 
-function analyzeAudio() {
+// "Generate Composition" — wipes everything and starts fresh
+function startFreshComposition() {
   if (!audioFileInput || !audioFileInput.files[0]) {
     if (statusDiv) statusDiv.textContent = '⚠️ Please select an audio file first';
     return;
   }
 
-  const file = audioFileInput.files[0];
-  if (statusDiv) statusDiv.textContent = `Transcribing ${getCategoryName(currentCategory)}...`;
-  if (loadingDiv) loadingDiv.style.display = 'block';
+  // Stop any previous audio cleanly
+  if (meydaAnalyzer) { try { meydaAnalyzer.stop(); } catch(e) {} meydaAnalyzer = null; }
+  if (source)        { try { source.stop(); } catch(e) {} try { source.disconnect(); } catch(e) {} source = null; }
+  if (analyser)      { try { analyser.disconnect(); } catch(e) {} analyser = null; }
 
-  // Seal whatever was recording before starting a new layer
-  finalizeLayer();
-
-  isAnalyzing            = true;
-  isPlaying              = false;
-  measures               = [];
-  measureBuffers         = [];
-  currentMeasureIndex    = 0;
-  previousSpectrum       = null;
+  // Full wipe — all layers gone
+  layers              = [];
+  measures            = [];
+  measureBuffers      = [];
+  currentMeasureIndex = 0;
+  previousSpectrum    = null;
   globalPitchAccumulator = {};
-  detectedSongKey        = null;
-  songKeyHueOffset       = 0;
+  detectedSongKey     = null;
+  songKeyHueOffset    = 0;
   if (scalePalette) songKeyHueOffset = -(SCRIABIN_BASE_HUE[scalePalette._rootKey] ?? 0);
 
-  console.log(`Transcribing ${currentCategory} from:`, file.name);
+  _startRecording();
+}
+
+// "Add Instrument Layer" — seals what's recording, keeps all layers, starts new one
+function addInstrumentLayer() {
+  if (!audioFileInput || !audioFileInput.files[0]) {
+    if (statusDiv) statusDiv.textContent = '⚠️ Please select an audio file first';
+    return;
+  }
+  if (layers.length >= 5) {
+    if (statusDiv) statusDiv.textContent = '⚠️ Maximum 5 layers reached — reset to start over';
+    return;
+  }
+
+  // Stop current playback and seal the layer
+  if (meydaAnalyzer) { try { meydaAnalyzer.stop(); } catch(e) {} meydaAnalyzer = null; }
+  if (source)        { try { source.stop(); } catch(e) {} try { source.disconnect(); } catch(e) {} source = null; }
+  if (analyser)      { try { analyser.disconnect(); } catch(e) {} analyser = null; }
+  isPlaying = false;
+
+  finalizeLayer(); // seal current measures into layers[]
+
+  // Reset per-layer state — layers[] untouched
+  measures            = [];
+  measureBuffers      = [];
+  currentMeasureIndex = 0;
+  previousSpectrum    = null;
+  globalPitchAccumulator = {};
+  detectedSongKey     = null;
+  songKeyHueOffset    = 0;
+  if (scalePalette) songKeyHueOffset = -(SCRIABIN_BASE_HUE[scalePalette._rootKey] ?? 0);
+
+  _startRecording();
+}
+
+// Shared bootstrap — reads file and kicks off Meyda
+function _startRecording() {
+  const file = audioFileInput.files[0];
+  const layerNum = layers.length + 1;
+  if (statusDiv) statusDiv.textContent = `Recording layer ${layerNum}: ${getCategoryName(currentCategory)}…`;
+  if (loadingDiv) loadingDiv.style.display = 'block';
+  isAnalyzing = true;
+  isPlaying   = false;
 
   if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
 
   const fileReader = new FileReader();
-  fileReader.onload = (e) => {
-    audioContext.decodeAudioData(e.target.result, (buffer) => {
+  fileReader.onload = (evt) => {
+    audioContext.decodeAudioData(evt.target.result, (buffer) => {
       audioBuffer = buffer;
       setupAudioPlayback();
-      if (statusDiv) statusDiv.textContent = `Transcribing ${getCategoryName(currentCategory)}... Playing`;
     }, (error) => {
-      console.error("Error decoding audio:", error);
-      if (statusDiv) statusDiv.textContent = '⚠️ Error decoding audio file';
+      console.error('Audio decode error:', error);
+      if (statusDiv)  statusDiv.textContent = '⚠️ Error decoding audio file';
       if (loadingDiv) loadingDiv.style.display = 'none';
       isAnalyzing = false;
     });
   };
   fileReader.readAsArrayBuffer(file);
 }
+
+// Alias so nothing old breaks
+function analyzeAudio() { startFreshComposition(); }
 
 function setupAudioPlayback() {
   if (!audioBuffer || !audioContext) return;
@@ -446,8 +492,13 @@ function setupAudioPlayback() {
     // the next layer, avoiding any race with the measures[] reset.
     source.onended = () => {
       isPlaying = false;
-      if (statusDiv) statusDiv.textContent =
-        `Done — upload another file to add a layer, or download.`;
+      if (statusDiv) {
+        const totalDone = layers.length + (measures.length > 0 ? 1 : 0);
+        const remaining = 5 - totalDone;
+        statusDiv.textContent = remaining > 0
+          ? `Layer ${totalDone} done. Choose a new file + category, then click "Add Instrument Layer".`
+          : `All 5 layers recorded. Click Download to save.`;
+      }
       if (pauseButton) pauseButton.textContent = 'Pause';
     };
 
@@ -647,15 +698,32 @@ function generateMeasureFromBuffer(measureIndex) {
 // Saves the completed layer into the persistent layers[] stack.
 function finalizeLayer() {
   if (measures.length === 0) return;
-  // Snapshot the measures into a finished layer
   const snapshot = [...measures];
-  measures = []; // clear immediately so it can't be double-finalized
+  measures = [];
   layers.push({
     category : currentCategory,
     measures : snapshot,
     label    : getCategoryName(currentCategory),
   });
   console.log(`Layer saved: ${currentCategory}, ${snapshot.length} measures. Total layers: ${layers.length}`);
+  updateLayerUI();
+}
+
+// Show/hide the "Add Instrument Layer" button and update the counter badge
+function updateLayerUI() {
+  const addBtn   = document.getElementById('add-layer-btn');
+  const counter  = document.getElementById('layer-counter');
+  const numSpan  = document.getElementById('layer-num');
+  const total    = layers.length;
+
+  if (addBtn) {
+    // Show once at least one layer exists and we haven't hit the cap
+    addBtn.style.display = (total >= 1 && total < 5) ? 'block' : 'none';
+  }
+  if (counter) {
+    counter.style.display = total >= 1 ? 'flex' : 'none';
+    if (numSpan) numSpan.textContent = total;
+  }
 }
 
 // ----------------------------------------------------

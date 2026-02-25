@@ -92,13 +92,24 @@
             </div>
 
             <button id="generate-palette-btn" class="palette-btn">Generate Palette</button>
-
-            <!-- Swatch strip — filled by renderSwatches() in sketch.js -->
             <div id="palette-swatches" class="palette-swatches"></div>
         </div>
 
           <div class="control-section actions">
-              <button id="analyze-btn" class="primary-btn">Generate Composition</button>
+
+            <!-- Step 1: first layer -->
+            <button id="analyze-btn" class="primary-btn">Generate Composition</button>
+
+            <!-- Step 2: add more layers (hidden until first layer is done) -->
+            <button id="add-layer-btn" class="add-layer-btn">
+              Add Instrument Layer
+            </button>
+
+            <!-- Layer counter badge -->
+            <div id="layer-counter" class="layer-counter" style="display:none;">
+              Layer <span id="layer-num">0</span> / 5
+            </div>
+
               <div class="button-group">
                   <button id="pause-btn">Pause</button>
                   <button id="reset-btn">Reset</button>
@@ -122,10 +133,7 @@
     <p><</p>
   </button>
 
-  <!-- Main Canvas Container -->
-  <main id="canvas-container">
-      <!-- p5.js canvas will be inserted here -->
-  </main>
+  <main id="canvas-container"></main>
 
   <script src="sketch.js"></script>
   

@@ -325,6 +325,34 @@ input[type="range"]::-webkit-slider-thumb:hover {
   background-size: 16px;
 }
 
+.add-layer-btn {
+  width: 100%;
+  padding: 10px 14px;
+  background: transparent;
+  border: 1px solid currentColor;
+  color: inherit;
+  font-family: inherit;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  cursor: pointer;
+  opacity: 0.85;
+  transition: opacity 0.15s, background 0.15s;
+}
+
+.add-layer-btn:hover { opacity: 1; background: black; }
+
+/* Layer counter badge */
+.layer-counter {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 6px;
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  opacity: 0.5;
+}
+
 /* BUTTONS */
 .actions {
   display: flex;

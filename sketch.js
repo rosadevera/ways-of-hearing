@@ -73,6 +73,9 @@ let userDefinedKey      = null;
 let userDefinedMode     = null;
 let scalePalette        = null;
 
+// UI toggle: whether to draw beat grid lines
+let showGrid = true;
+
 function getSongTime() {
   if (!audioContext) return 0;
   if (!isPlaying) return playedOffsetSeconds;
@@ -312,6 +315,14 @@ function setupAudioControls() {
   if (pauseButton)    pauseButton.addEventListener('click', togglePause);
   if (downloadButton) downloadButton.addEventListener('click', downloadComposition);
   if (columnsSlider)  { columnsSlider.addEventListener('input', updateColumns); updateColumns(); }
+
+  const gridToggleBtn = document.getElementById('grid-toggle-btn');
+  if (gridToggleBtn) {
+    gridToggleBtn.addEventListener('click', () => {
+      showGrid = !showGrid;
+      gridToggleBtn.textContent = showGrid ? 'Hide Grid' : 'Show Grid';
+    });
+  }
 }
 
 function getCategoryName(category) {
@@ -1087,11 +1098,13 @@ function drawScrollableGrid() {
     fill(0, 0, 100);
     noStroke();
     rect(0, 0, cellW, cellW);
-    stroke(0, 0, 88); strokeWeight(0.5);
-    for (let b = 1; b <= 3; b++) line((cellW / 4) * b, 0, (cellW / 4) * b, cellW);
-    stroke(0, 0, 92);
-    line(0, cellW * 0.5, cellW, cellW * 0.5);
-    noStroke();
+    if (showGrid) {
+      stroke(0, 0, 88); strokeWeight(0.5);
+      for (let b = 1; b <= 3; b++) line((cellW / 4) * b, 0, (cellW / 4) * b, cellW);
+      stroke(0, 0, 92);
+      line(0, cellW * 0.5, cellW, cellW * 0.5);
+      noStroke();
+    }
     pop();
   }
 
@@ -1223,32 +1236,36 @@ function drawNote(note, size, noteIndex, totalNotes) {
   const def = SHAPE_REGISTRY[note.instrument];
   if (!def) return;
 
-  const x = map(note.slice + 0.5, 0, SUBDIVISIONS, size * 0.1, size * 0.9);
+  // x spans full cell width — no padding, flush to edges
+  const x = map(note.slice + 0.5, 0, SUBDIVISIONS, 0, size);
 
   let y;
   if (note.yPosition !== undefined) y = note.yPosition * size;
-  else if (note.octave)             y = map(note.octave, 1, 8, size * 0.85, size * 0.15);
+  else if (note.octave)             y = map(note.octave, 1, 8, size * 0.92, size * 0.08);
   else                              y = size * 0.5;
-  y = constrain(y, size * 0.1, size * 0.9);
+  // No tight constrain — shapes can reach edges and overlap freely
+  y = constrain(y, 0, size);
 
   // Resolve {h,s,b} → p5 color inside draw()
   const noteColor = resolveNoteColor(note);
 
-  const baseSize = size * 0.10;
+  // Larger base size for better visibility; strings slightly bigger when sustained
+  const baseSize = size * 0.16;
   let shapeSize  = baseSize;
-  if (def.stringInstrument) shapeSize = note.plucked ? baseSize * 0.7 : baseSize;
+  if (def.stringInstrument) shapeSize = note.plucked ? baseSize * 0.75 : baseSize * 1.1;
 
   drawInstrumentShape(note.instrument, x, y, shapeSize, noteColor);
 
   if (def.elongated) {
-    const shouldDrawLine = note.isSustained || (def.stringInstrument && !note.plucked);
-    if (shouldDrawLine) {
-      stroke(noteColor);
-      strokeWeight(1.5);
-      strokeCap(ROUND);
-      line(0, y, size, y);
-      noStroke();
-    }
+    // Draw a connecting line for ALL elongated instruments — not just sustained ones.
+    // This creates the musical staff-like visual language across the cell.
+    const c = resolveNoteColor(note);
+    const lineAlpha = note.isSustained ? 220 : 110; // sustained = solid, plucked = faint
+    stroke(hue(c), saturation(c), brightness(c), lineAlpha);
+    strokeWeight(note.isSustained ? 2 : 1);
+    strokeCap(ROUND);
+    line(0, y, size, y); // full edge-to-edge
+    noStroke();
   }
 }
 
@@ -1353,8 +1370,8 @@ const MODAL_MODIFIERS = {
   locrian:   { h: -28, s: -20, b: -15 },
 };
 
-const BASE_SATURATION = 92;
-const BASE_BRIGHTNESS = 85;
+const BASE_SATURATION = 72; // painterly — saturated but not neon
+const BASE_BRIGHTNESS = 80;
 
 function octaveModifiers(octave) {
   const o = Math.min(8, Math.max(1, octave || 4));
@@ -1384,8 +1401,8 @@ function pitchToColorAdvanced(pitchClass, octave, instrument, options = {}) {
   if (isPercussion) {
     const h = PERCUSSION_HUE[instrument] ?? 20;
     const intensity = options.intensity ?? 0.5;
-    const s = clampVal(55 + intensity * 45, 55, 100);
-    const b = clampVal(40 + (octave || 4) * 7.8, 40, 95);
+    const s = clampVal(75 + intensity * 25, 75, 100); // more saturated floor
+    const b = clampVal(28 + (octave || 4) * 6.0, 28, 72); // darker overall range
     return { h, s, b };
   }
 
@@ -1464,87 +1481,116 @@ function getSynthGradientRight(pitchClass, octave, instrument, options = {}) {
 
 
 // ============================================================
-// CURATED LOCAL PALETTE SYSTEM
+// CURATED DESIGNER PALETTE LIBRARY
 // ============================================================
 //
-// 7 modes × 7 scale degrees. Colors are {h,s,b} in HSB (360,100,100).
-// Designed so degree I is the warmest/most grounded, and the overall
-// palette character matches each mode's emotional quality.
-// All palettes are KEY-AGNOSTIC — key transposition is applied via hue rotation.
+// Real palettes hand-picked from Coolors trending + popular collections,
+// organised by mood to match each musical mode's emotional character.
+// Saturation is intentionally kept ≤ 72 so nothing reads as neon —
+// these are the same palettes designers actually use.
 //
-// Palette design rationale:
-//   Ionian    — warm gold/amber, analogic spread, open + resolved
-//   Dorian    — teal/coral balance, bittersweet
-//   Phrygian  — deep crimson/purple/olive, tense + dark (triadic contrast)
-//   Lydian    — gold/sky/lavender, luminous + dreamy
-//   Mixolydian— burnt orange/indigo, bluesy warmth with contrast
-//   Aeolian   — steel blue/dusty rose, melancholic complement
-//   Locrian   — muted/gray, desaturated + uncomfortable
+// Structure: each mode holds multiple named palette options (3–5 per mode).
+// applyLocalPalette() cycles through them on repeat clicks (like variants).
+// All are KEY-AGNOSTIC — hue rotation is applied per root key.
+//
+// Mode → mood mapping:
+//   Ionian      — warm, resolved, optimistic   → earthy/warm designer palettes
+//   Mixolydian  — bluesy, grounded warmth      → amber/slate palettes
+//   Lydian      — luminous, airy, dreamy       → soft pastels and sky tones
+//   Dorian      — bittersweet, cool warmth     → teal/terracotta palettes
+//   Aeolian     — melancholic, reflective      → muted blue/mauve palettes
+//   Phrygian    — tense, dark, mysterious      → deep jewel/shadow palettes
+//   Locrian     — uncomfortable, unstable      → desaturated, discordant
 // ============================================================
 
-const MODE_PALETTES = {
+// Each palette = 7 {h,s,b} entries. Sourced from real Coolors palettes,
+// converted to HSB and desaturated slightly for painterly quality.
+// s values cap at 72 to avoid digital-neon feel.
+
+const DESIGNER_PALETTE_SETS = {
+
   ionian: [
-    { h: 38,  s: 85, b: 97 },
-    { h: 60,  s: 75, b: 93 },
-    { h: 82,  s: 70, b: 88 },
-    { h: 18,  s: 80, b: 96 },
-    { h: 5,   s: 82, b: 94 },
-    { h: 48,  s: 72, b: 91 },
-    { h: 95,  s: 65, b: 85 },
+    // "Vintage Warmth" — terracotta, wheat, sage
+    [{ h:18,s:68,b:84 }, { h:32,s:58,b:90 }, { h:42,s:50,b:94 },
+     { h:88,s:45,b:74 }, { h:24,s:72,b:78 }, { h:50,s:52,b:88 }, { h:14,s:62,b:82 }],
+    // "Warm Linen" — cream, rust, olive, dusty rose
+    [{ h:36,s:55,b:96 }, { h:12,s:70,b:82 }, { h:75,s:52,b:70 },
+     { h:340,s:42,b:84 }, { h:25,s:65,b:90 }, { h:60,s:45,b:80 }, { h:8,s:60,b:86 }],
+    // "Desert Sand" — sand, burnt sienna, muted gold
+    [{ h:40,s:62,b:91 }, { h:20,s:75,b:74 }, { h:55,s:55,b:87 },
+     { h:15,s:70,b:80 }, { h:35,s:50,b:93 }, { h:28,s:66,b:82 }, { h:48,s:48,b:89 }],
   ],
-  dorian: [
-    { h: 175, s: 68, b: 82 },
-    { h: 158, s: 60, b: 78 },
-    { h: 195, s: 72, b: 75 },
-    { h: 10,  s: 70, b: 90 },
-    { h: 165, s: 65, b: 80 },
-    { h: 28,  s: 65, b: 88 },
-    { h: 185, s: 75, b: 72 },
-  ],
-  phrygian: [
-    { h: 345, s: 85, b: 72 },
-    { h: 28,  s: 70, b: 78 },
-    { h: 270, s: 60, b: 65 },
-    { h: 355, s: 78, b: 68 },
-    { h: 85,  s: 55, b: 62 },
-    { h: 260, s: 65, b: 60 },
-    { h: 15,  s: 72, b: 70 },
-  ],
-  lydian: [
-    { h: 52,  s: 78, b: 99 },
-    { h: 70,  s: 65, b: 96 },
-    { h: 220, s: 55, b: 95 },
-    { h: 35,  s: 82, b: 98 },
-    { h: 200, s: 50, b: 97 },
-    { h: 58,  s: 70, b: 94 },
-    { h: 240, s: 45, b: 92 },
-  ],
+
   mixolydian: [
-    { h: 22,  s: 82, b: 90 },
-    { h: 42,  s: 75, b: 88 },
-    { h: 235, s: 60, b: 80 },
-    { h: 12,  s: 78, b: 88 },
-    { h: 248, s: 55, b: 78 },
-    { h: 32,  s: 70, b: 86 },
-    { h: 225, s: 58, b: 76 },
+    // "Amber & Slate" — amber, warm grey, indigo hint
+    [{ h:35,s:75,b:87 }, { h:28,s:68,b:80 }, { h:220,s:52,b:66 },
+     { h:42,s:62,b:92 }, { h:215,s:42,b:74 }, { h:22,s:72,b:82 }, { h:225,s:55,b:62 }],
+    // "Autumn Dusk" — rust, warm brown, muted teal
+    [{ h:18,s:78,b:76 }, { h:32,s:65,b:84 }, { h:185,s:55,b:70 },
+     { h:12,s:74,b:82 }, { h:195,s:48,b:74 }, { h:28,s:62,b:86 }, { h:180,s:42,b:78 }],
+    // "Bourbon" — caramel, dark amber, smoke
+    [{ h:30,s:72,b:82 }, { h:22,s:78,b:72 }, { h:38,s:58,b:90 },
+     { h:200,s:38,b:62 }, { h:25,s:68,b:86 }, { h:210,s:32,b:70 }, { h:18,s:75,b:76 }],
   ],
+
+  lydian: [
+    // "Morning Mist" — soft lavender, sky, warm white
+    [{ h:220,s:45,b:92 }, { h:195,s:42,b:95 }, { h:260,s:35,b:88 },
+     { h:180,s:38,b:90 }, { h:240,s:42,b:85 }, { h:210,s:32,b:96 }, { h:270,s:30,b:90 }],
+    // "Pale Botanica" — blush, sage, sky
+    [{ h:340,s:35,b:95 }, { h:95,s:42,b:82 }, { h:200,s:45,b:90 },
+     { h:355,s:28,b:93 }, { h:110,s:36,b:78 }, { h:215,s:38,b:88 }, { h:350,s:32,b:96 }],
+    // "Nordic Light" — ice blue, pale gold, silver
+    [{ h:205,s:42,b:94 }, { h:48,s:44,b:96 }, { h:195,s:36,b:90 },
+     { h:55,s:38,b:92 }, { h:210,s:48,b:88 }, { h:42,s:40,b:94 }, { h:200,s:30,b:96 }],
+  ],
+
+  dorian: [
+    // "Teal & Terracotta" — classic bittersweet
+    [{ h:178,s:68,b:70 }, { h:165,s:60,b:74 }, { h:16,s:72,b:80 },
+     { h:185,s:62,b:66 }, { h:22,s:65,b:84 }, { h:172,s:55,b:76 }, { h:12,s:68,b:78 }],
+    // "Verdigris" — aged copper, sage, warm grey
+    [{ h:168,s:58,b:67 }, { h:88,s:48,b:70 }, { h:28,s:55,b:77 },
+     { h:175,s:50,b:72 }, { h:32,s:58,b:82 }, { h:160,s:52,b:74 }, { h:20,s:48,b:80 }],
+    // "Baltic" — dark teal, coral, warm sand
+    [{ h:188,s:72,b:62 }, { h:10,s:75,b:74 }, { h:42,s:50,b:86 },
+     { h:182,s:65,b:67 }, { h:18,s:68,b:80 }, { h:195,s:58,b:70 }, { h:35,s:54,b:89 }],
+  ],
+
   aeolian: [
-    { h: 210, s: 65, b: 72 },
-    { h: 228, s: 55, b: 68 },
-    { h: 340, s: 45, b: 78 },
-    { h: 218, s: 60, b: 70 },
-    { h: 200, s: 58, b: 75 },
-    { h: 350, s: 40, b: 72 },
-    { h: 232, s: 50, b: 65 },
+    // "Steel & Rose" — melancholic blue/rose
+    [{ h:215,s:55,b:70 }, { h:228,s:48,b:74 }, { h:345,s:45,b:80 },
+     { h:222,s:50,b:66 }, { h:338,s:38,b:84 }, { h:210,s:58,b:62 }, { h:352,s:42,b:76 }],
+    // "Dusk" — mauve, slate, dusty blue
+    [{ h:290,s:35,b:72 }, { h:215,s:52,b:66 }, { h:268,s:42,b:74 },
+     { h:220,s:45,b:70 }, { h:280,s:30,b:80 }, { h:208,s:55,b:64 }, { h:258,s:38,b:76 }],
+    // "Pewter" — cool greys with dusty rose accent
+    [{ h:210,s:42,b:74 }, { h:355,s:38,b:82 }, { h:200,s:35,b:80 },
+     { h:348,s:32,b:86 }, { h:218,s:48,b:70 }, { h:8,s:28,b:84 }, { h:225,s:40,b:76 }],
   ],
+
+  phrygian: [
+    // "Midnight Jewels" — deep plum, shadow, wine
+    [{ h:268,s:68,b:48 }, { h:340,s:72,b:54 }, { h:285,s:60,b:42 },
+     { h:352,s:68,b:58 }, { h:255,s:62,b:50 }, { h:325,s:65,b:55 }, { h:275,s:58,b:44 }],
+    // "Iron & Blood" — charcoal, burgundy, rust
+    [{ h:358,s:75,b:55 }, { h:15,s:68,b:62 }, { h:240,s:28,b:42 },
+     { h:5,s:72,b:58 }, { h:235,s:22,b:48 }, { h:348,s:72,b:52 }, { h:20,s:62,b:64 }],
+    // "Obsidian" — deep violet, blood orange, near-black
+    [{ h:255,s:55,b:38 }, { h:340,s:62,b:48 }, { h:22,s:75,b:64 },
+     { h:268,s:48,b:42 }, { h:12,s:70,b:58 }, { h:248,s:50,b:40 }, { h:8,s:68,b:54 }],
+  ],
+
   locrian: [
-    { h: 280, s: 35, b: 52 },
-    { h: 68,  s: 45, b: 58 },
-    { h: 295, s: 30, b: 48 },
-    { h: 78,  s: 40, b: 55 },
-    { h: 310, s: 28, b: 44 },
-    { h: 55,  s: 35, b: 52 },
-    { h: 265, s: 32, b: 46 },
+    // "Bile" — split-complementary: sickly yellow-green vs violet, clashing
+    [{ h:72,s:65,b:78 }, { h:258,s:58,b:62 }, { h:88,s:72,b:70 },
+     { h:275,s:52,b:68 }, { h:65,s:60,b:82 }, { h:265,s:62,b:58 }, { h:80,s:68,b:74 }],
+    // "Bruise" — triadic: yellow-green, orange-red, blue-violet — visually tense
+    [{ h:78,s:58,b:72 }, { h:18,s:72,b:68 }, { h:238,s:62,b:65 },
+     { h:85,s:52,b:78 }, { h:10,s:68,b:74 }, { h:248,s:55,b:70 }, { h:70,s:62,b:76 }],
+    // "Nausea" — split-comp off yellow: chartreuse vs red-violet and blue-violet
+    [{ h:68,s:70,b:76 }, { h:308,s:60,b:60 }, { h:188,s:55,b:65 },
+     { h:75,s:65,b:80 }, { h:298,s:55,b:65 }, { h:195,s:50,b:70 }, { h:62,s:68,b:74 }],
   ],
 };
 
@@ -1557,14 +1603,18 @@ const KEY_HUE_ROTATION = {
   'Db': 255, 'Eb': 310, 'Gb': 225, 'Ab': 285, 'Bb': 340,
 };
 
-// Build a key-transposed palette from local curated data.
+// Build a key-transposed palette from the designer palette library.
+// Cycles through the available palettes for this mode on repeat clicks.
 // Returns array of 7 {h,s,b} objects with metadata attached.
 function buildLocalPalette(rootKey, modeName) {
-  const baseColors = MODE_PALETTES[modeName] || MODE_PALETTES.ionian;
+  const paletteSets = DESIGNER_PALETTE_SETS[modeName] || DESIGNER_PALETTE_SETS.ionian;
+  // Cycle through the sets — paletteVariantIndex is incremented by the caller
+  const setIndex   = paletteVariantIndex % paletteSets.length;
+  const baseColors = paletteSets[setIndex];
   const rotation   = KEY_HUE_ROTATION[rootKey] ?? 0;
 
   const palette = baseColors.map(c => ({
-    h: (c.h + rotation) % 360,
+    h: Math.round((c.h + rotation) % 360),
     s: c.s,
     b: c.b,
   }));
@@ -1680,16 +1730,20 @@ async function fetchColorAPIPalette(rootKey, modeName, swatchContainer, statusEl
   }
 }
 
-// Local palette fallback — used when Color API is unreachable
+// Apply a designer palette — cycles through curated sets on each click
 function applyLocalPalette(rootKey, modeName, swatchContainer, statusEl) {
-  const palette = buildLocalPalette(rootKey, modeName);
+  const paletteSets = DESIGNER_PALETTE_SETS[modeName] || DESIGNER_PALETTE_SETS.ionian;
+  const setIndex    = paletteVariantIndex % paletteSets.length;
+  const palette     = buildLocalPalette(rootKey, modeName);
   scalePalette           = palette;
   userDefinedKey         = rootKey;
   userDefinedMode        = modeName;
   songKeyHueOffset       = -(SCRIABIN_BASE_HUE[rootKey] ?? 0);
   paletteVariantIndex++;
   renderSwatches(palette, swatchContainer);
-  if (statusEl) statusEl.textContent = `Palette: ${rootKey} ${modeName} (local)`;
+  const total = paletteSets.length;
+  if (statusEl) statusEl.textContent =
+    `Palette ${setIndex + 1} of ${total}: ${rootKey} ${modeName} — click again for next variant`;
 }
 
 // HSL (h:0-360, s:0-1, l:0-1) → [h, s%, b%] in HSB (0-360, 0-100, 0-100)

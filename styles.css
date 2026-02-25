@@ -289,6 +289,10 @@ input[type="range"]::-webkit-slider-thumb:hover {
   border-radius: 0;
 }
 
+.grid-toggle-btn {
+  margin-bottom: 10px;
+}
+
 /* SELECT DROPDOWN */
 .category-select {
   width: 100%;

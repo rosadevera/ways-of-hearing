@@ -125,7 +125,7 @@ function preload() {
       (data) => {
         console.log("JSON loaded with", Object.keys(data).length, "instruments");
         SHAPE_REGISTRY = data;
-        loadCategorySVGs();
+        loadAllCategorySVGs(); // load SVGs for every category upfront
       },
       () => { console.log("shapes.json not found, using fallback"); createFallbackRegistry(); }
     );
@@ -135,19 +135,30 @@ function preload() {
   }
 }
 
-function loadCategorySVGs() {
-  const instrumentsToLoad = INSTRUMENTS_BY_CATEGORY[currentCategory] || [];
+// Load SVGs for a specific category — additive, never wipes existing entries.
+function loadCategorySVGs(category) {
+  const cat = category || currentCategory;
+  const instrumentsToLoad = INSTRUMENTS_BY_CATEGORY[cat] || [];
   for (let instrument of instrumentsToLoad) {
+    if (SHAPE_SVGS[instrument]) continue; // already loaded — don't reload
     let def = SHAPE_REGISTRY[instrument];
     if (def && def.svg) {
       SHAPE_SVGS[instrument] = loadImage(
         def.svg,
-        () => console.log("Loaded:", instrument),
-        () => { console.log("Failed to load SVG for:", instrument); createPlaceholderFor(instrument); }
+        () => console.log("Loaded SVG:", instrument),
+        () => { console.log("No SVG for:", instrument); createPlaceholderFor(instrument); }
       );
     } else {
       createPlaceholderFor(instrument);
     }
+  }
+}
+
+// Preload SVGs for ALL instrument categories at startup so every layer
+// can draw correctly regardless of which category was active when it recorded.
+function loadAllCategorySVGs() {
+  for (const cat of Object.keys(INSTRUMENTS_BY_CATEGORY)) {
+    loadCategorySVGs(cat);
   }
 }
 
@@ -205,8 +216,11 @@ function createFallbackRegistry() {
     arpeggio: { gradient: true, synthBlock: true, category: 'synths' }
   };
 
-  for (let category in DEFAULT_INSTRUMENTS) {
-    createPlaceholderFor(DEFAULT_INSTRUMENTS[category]);
+  // Create placeholders for every instrument in every category
+  for (const cat of Object.keys(INSTRUMENTS_BY_CATEGORY)) {
+    for (const instrument of INSTRUMENTS_BY_CATEGORY[cat]) {
+      createPlaceholderFor(instrument);
+    }
   }
 }
 
@@ -257,8 +271,8 @@ function setupAudioControls() {
     categorySelect.addEventListener('change', (e) => {
       currentCategory = e.target.value;
       if (statusDiv) statusDiv.textContent = `Selected: ${getCategoryName(currentCategory)}`;
-      SHAPE_SVGS = {};
-      loadCategorySVGs();
+      // Load any missing SVGs for this category — additive, never wipes existing ones
+      loadCategorySVGs(currentCategory);
     });
   }
 
@@ -335,9 +349,11 @@ function analyzeAudio() {
   if (statusDiv) statusDiv.textContent = `Transcribing ${getCategoryName(currentCategory)}...`;
   if (loadingDiv) loadingDiv.style.display = 'block';
 
+  // Seal whatever was recording before starting a new layer
+  finalizeLayer();
+
   isAnalyzing            = true;
   isPlaying              = false;
-  // Start a FRESH measures array for this layer — previous layers are kept in `layers[]`
   measures               = [];
   measureBuffers         = [];
   currentMeasureIndex    = 0;
@@ -370,8 +386,12 @@ function analyzeAudio() {
 function setupAudioPlayback() {
   if (!audioBuffer || !audioContext) return;
 
-  if (source)        { source.stop(); source.disconnect(); }
-  if (meydaAnalyzer) meydaAnalyzer.stop();
+  // Safely tear down any previous audio graph before building a new one.
+  // source.stop() throws InvalidStateError if the source already ended —
+  // that exception would bubble up and silently kill the whole setup.
+  if (meydaAnalyzer) { try { meydaAnalyzer.stop(); } catch(e) {} meydaAnalyzer = null; }
+  if (source)        { try { source.stop();         } catch(e) {} try { source.disconnect(); } catch(e) {} source = null; }
+  if (analyser)      { try { analyser.disconnect();  } catch(e) {} analyser = null; }
 
   source = audioContext.createBufferSource();
   source.buffer = audioBuffer;
@@ -421,24 +441,24 @@ function setupAudioPlayback() {
     startTime = audioContext.currentTime;
     resetSongClock();
 
-    // When playback ends naturally, seal the layer
+    // When playback ends naturally — update UI, but don't call finalizeLayer here.
+    // finalizeLayer() is called at the top of analyzeAudio() when the user starts
+    // the next layer, avoiding any race with the measures[] reset.
     source.onended = () => {
-      // Use a small timeout so the last Meyda callback has time to fire
-      setTimeout(() => {
-        finalizeLayer();
-        isPlaying = false;
-        if (statusDiv) statusDiv.textContent =
-          `Layer ${layers.length} saved (${getCategoryName(currentCategory)}). Upload another file to add a layer.`;
-        if (pauseButton) pauseButton.textContent = 'Pause';
-      }, 200);
+      isPlaying = false;
+      if (statusDiv) statusDiv.textContent =
+        `Done — upload another file to add a layer, or download.`;
+      if (pauseButton) pauseButton.textContent = 'Pause';
     };
 
     // Resume AudioContext in case it was suspended (required on second+ play)
     audioContext.resume().then(() => {
       source.start(0);
-      isPlaying   = true;
-      isAnalyzing = false;
-      startBeatClock();
+      isPlaying            = true;
+      isAnalyzing          = false;
+      // Reset beat clock inline (startBeatClock was never defined — this replaces it)
+      beatClockStart         = performance.now();
+      beatClockPlayedSeconds = 0;
 
       if (loadingDiv)  loadingDiv.style.display = 'none';
       if (statusDiv)   statusDiv.textContent = `Transcribing ${getCategoryName(currentCategory)} at ${BPM} BPM`;
@@ -627,12 +647,15 @@ function generateMeasureFromBuffer(measureIndex) {
 // Saves the completed layer into the persistent layers[] stack.
 function finalizeLayer() {
   if (measures.length === 0) return;
+  // Snapshot the measures into a finished layer
+  const snapshot = [...measures];
+  measures = []; // clear immediately so it can't be double-finalized
   layers.push({
     category : currentCategory,
-    measures : [...measures],
+    measures : snapshot,
     label    : getCategoryName(currentCategory),
   });
-  console.log(`Layer saved: ${currentCategory}, ${measures.length} measures. Total layers: ${layers.length}`);
+  console.log(`Layer saved: ${currentCategory}, ${snapshot.length} measures. Total layers: ${layers.length}`);
 }
 
 // ----------------------------------------------------
@@ -871,8 +894,9 @@ function resetComposition() {
   resetSongClock();
   userHasSetBPM = false;
 
-  if (source)        { source.stop(); source.disconnect(); }
-  if (meydaAnalyzer) meydaAnalyzer.stop();
+  if (meydaAnalyzer) { try { meydaAnalyzer.stop(); } catch(e) {} meydaAnalyzer = null; }
+  if (source)        { try { source.stop(); } catch(e) {} try { source.disconnect(); } catch(e) {} source = null; }
+  if (analyser)      { try { analyser.disconnect(); } catch(e) {} analyser = null; }
 
   isPlaying   = false;
   isAnalyzing = false;
@@ -883,7 +907,11 @@ function resetComposition() {
 }
 
 function downloadComposition() {
-  if (measures.length === 0) {
+  // Seal the current recording before checking
+  finalizeLayer();
+  measures = [];
+
+  if (layers.length === 0) {
     if (statusDiv) statusDiv.textContent = '⚠️ No composition to download';
     return;
   }

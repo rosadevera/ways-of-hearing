@@ -11,9 +11,7 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <!-- Fixed Sidebar -->
   <div id="sidebar" class="sidebar">
-    <!-- Menu Toggle Button -->
       <div class="sidebar-header">
           <h1>WAYS OF HEARING</h1>
           <p class="subtitle">a generative tool</p>
@@ -58,8 +56,49 @@
               </div>
           </div>
 
+          <div class="control-section">
+            <h3>04 / KEY AND MODE</h3>
+            <p class="section-hint">Set the key and mode of the song to generate a cohesive colour palette for the composition.</p>
+
+            <div class="control-group">
+                <label for="key-select">Root Key</label>
+                <select id="key-select">
+                    <option value="C">C</option>
+                    <option value="C#">C# / D♭</option>
+                    <option value="D">D</option>
+                    <option value="D#">D# / E♭</option>
+                    <option value="E">E</option>
+                    <option value="F">F</option>
+                    <option value="F#">F# / G♭</option>
+                    <option value="G" selected>G</option>
+                    <option value="G#">G# / A♭</option>
+                    <option value="A">A</option>
+                    <option value="A#">A# / B♭</option>
+                    <option value="B">B</option>
+                </select>
+            </div>
+
+            <div class="control-group">
+                <label for="mode-select">Mode</label>
+                <select id="mode-select">
+                    <option value="ionian">Ionian</option>
+                    <option value="dorian">Dorian</option>
+                    <option value="phrygian">Phrygian</option>
+                    <option value="lydian">Lydian</option>
+                    <option value="mixolydian">Mixolydian</option>
+                    <option value="aeolian">Aeolian (Minor)</option>
+                    <option value="locrian">Locrian</option>
+                </select>
+            </div>
+
+            <button id="generate-palette-btn" class="palette-btn">Generate Palette</button>
+
+            <!-- Swatch strip — filled by renderSwatches() in sketch.js -->
+            <div id="palette-swatches" class="palette-swatches"></div>
+        </div>
+
           <div class="control-section actions">
-              <button id="analyze-btn" class="primary-btn">Generate</button>
+              <button id="analyze-btn" class="primary-btn">Generate Composition</button>
               <div class="button-group">
                   <button id="pause-btn">Pause</button>
                   <button id="reset-btn">Reset</button>

@@ -21,12 +21,19 @@ const DEFAULT_INSTRUMENTS = {
   synths: 'synth'
 };
 
-let measures = [];
+// Each layer = one audio file + one instrument category.
+// Layers are composited on top of each other, all sharing the same palette.
+// Structure: [{ category, measures: [...], label }]
+let layers  = [];
+let measures = []; // always points to the CURRENTLY RECORDING layer's measures array
 
-// beatsPerMeasure is 4 (one measure = 4 counts, as a dancer counts it).
+// How many times "Generate" has been clicked for the current key+mode combo.
+// Used to seed The Color API with a different hue each time for variety.
+let paletteVariantIndex = 0;
+
 let beatsPerMeasure = 4;
 let BPM = 120;
-let measureDuration = (60 / BPM) * beatsPerMeasure; // 2.0s at 120 BPM default
+let measureDuration = (60 / BPM) * beatsPerMeasure;
 
 let columns = 4;
 let currentMeasureIndex = 0;
@@ -44,18 +51,27 @@ let meydaAnalyzer = null;
 let startTime = 0;
 let timeDomainBuffer = null;
 
-// BPM guard — prevents setupAudioPlayback() from overwriting user's BPM
 let userHasSetBPM = false;
 
 // Beat clock
-let beatClockStart    = null;
-let beatClockTime     = 0;
-let beatClockStep     = 0;
-let beatClockTimer    = null;
+let beatClockStart         = null;
+let beatClockTime          = 0;
+let beatClockStep          = 0;
+let beatClockTimer         = null;
 let beatClockPlayedSeconds = 0;
 
 let playbackStartAudioTime = 0;
 let playedOffsetSeconds    = 0;
+
+// Song key detection
+let globalPitchAccumulator = {};
+let detectedSongKey        = null;
+let songKeyHueOffset       = 0;
+
+// User-defined key + mode palette
+let userDefinedKey      = null;
+let userDefinedMode     = null;
+let scalePalette        = null;
 
 function getSongTime() {
   if (!audioContext) return 0;
@@ -64,7 +80,7 @@ function getSongTime() {
 }
 
 function resetSongClock() {
-  playedOffsetSeconds = 0;
+  playedOffsetSeconds    = 0;
   playbackStartAudioTime = audioContext ? audioContext.currentTime : 0;
 }
 
@@ -94,9 +110,9 @@ let audioFileInput, analyzeButton, resetButton, pauseButton, downloadButton;
 let columnsSlider, columnValueSpan, statusDiv, loadingDiv, fileNameDiv;
 
 // Temporal accumulation
-let measureBuffers = [];
+let measureBuffers   = [];
 let previousSpectrum = null;
-const SUBDIVISIONS = 8;
+const SUBDIVISIONS   = 8;
 
 // ----------------------------------------------------
 // PRELOAD
@@ -182,10 +198,11 @@ function createFallbackRegistry() {
     violin: { elongated: true, stringInstrument: true, category: 'strings' },
     viola: { elongated: true, stringInstrument: true, category: 'strings' },
     cello: { elongated: true, stringInstrument: true, category: 'strings' },
-    synth: { gradient: true, category: 'synths' },
-    pad: { gradient: true, category: 'synths' },
-    lead: { gradient: true, category: 'synths' },
-    bass_synth: { gradient: true, category: 'synths' }
+    synth:    { gradient: true, synthBlock: true, category: 'synths' },
+    pad:      { gradient: true, synthBlock: true, category: 'synths' },
+    lead:     { gradient: true, synthBlock: true, category: 'synths' },
+    bass_synth:{ gradient: true, synthBlock: true, category: 'synths' },
+    arpeggio: { gradient: true, synthBlock: true, category: 'synths' }
   };
 
   for (let category in DEFAULT_INSTRUMENTS) {
@@ -249,12 +266,25 @@ function setupAudioControls() {
     bpmInput.addEventListener('input', () => {
       const parsed = parseInt(bpmInput.value);
       if (!isNaN(parsed) && parsed > 0) {
-        BPM           = parsed;
-        userHasSetBPM = true;
+        BPM             = parsed;
+        userHasSetBPM   = true;
         measureDuration = (60 / BPM) * beatsPerMeasure;
         if (statusDiv) statusDiv.textContent = `BPM: ${BPM} — measure = ${measureDuration.toFixed(3)}s`;
-        console.log(`User set BPM: ${BPM}, measureDuration: ${measureDuration.toFixed(3)}s`);
       }
+    });
+  }
+
+  // Key + mode palette inputs
+  const keySelect  = document.getElementById('key-select');
+  const modeSelect = document.getElementById('mode-select');
+  const paletteBtn = document.getElementById('generate-palette-btn');
+  const swatchRow  = document.getElementById('palette-swatches');
+
+  if (paletteBtn) {
+    paletteBtn.addEventListener('click', () => {
+      const k = keySelect  ? keySelect.value  : 'C';
+      const m = modeSelect ? modeSelect.value : 'ionian';
+      applyLocalPalette(k, m, swatchRow, statusDiv);
     });
   }
 
@@ -305,12 +335,17 @@ function analyzeAudio() {
   if (statusDiv) statusDiv.textContent = `Transcribing ${getCategoryName(currentCategory)}...`;
   if (loadingDiv) loadingDiv.style.display = 'block';
 
-  isAnalyzing = true;
-  isPlaying   = false;
-  measures    = [];
-  measureBuffers      = [];
-  currentMeasureIndex = 0;
-  previousSpectrum    = null;
+  isAnalyzing            = true;
+  isPlaying              = false;
+  // Start a FRESH measures array for this layer — previous layers are kept in `layers[]`
+  measures               = [];
+  measureBuffers         = [];
+  currentMeasureIndex    = 0;
+  previousSpectrum       = null;
+  globalPitchAccumulator = {};
+  detectedSongKey        = null;
+  songKeyHueOffset       = 0;
+  if (scalePalette) songKeyHueOffset = -(SCRIABIN_BASE_HUE[scalePalette._rootKey] ?? 0);
 
   console.log(`Transcribing ${currentCategory} from:`, file.name);
 
@@ -351,11 +386,8 @@ function setupAudioPlayback() {
   analyser.connect(audioContext.destination);
 
   if (!userHasSetBPM) {
-    BPM = estimateBPM(audioBuffer.duration);
+    BPM             = estimateBPM(audioBuffer.duration);
     measureDuration = (60 / BPM) * beatsPerMeasure;
-    console.log(`Auto-estimated BPM: ${BPM}, measureDuration: ${measureDuration.toFixed(3)}s`);
-  } else {
-    console.log(`Using user BPM: ${BPM}, measureDuration: ${measureDuration.toFixed(3)}s`);
   }
 
   try {
@@ -370,9 +402,9 @@ function setupAudioPlayback() {
         let fundamentalHz = null;
 
         if (
-          currentCategory === 'keys' ||
+          currentCategory === 'keys'    ||
           currentCategory === 'strings' ||
-          currentCategory === 'wind' ||
+          currentCategory === 'wind'    ||
           currentCategory === 'synths'
         ) {
           if (analyser && timeDomainBuffer) {
@@ -387,20 +419,33 @@ function setupAudioPlayback() {
 
     meydaAnalyzer.start();
     startTime = audioContext.currentTime;
-
     resetSongClock();
 
-    source.start(0);
-    isPlaying   = true;
-    isAnalyzing = false;
+    // When playback ends naturally, seal the layer
+    source.onended = () => {
+      // Use a small timeout so the last Meyda callback has time to fire
+      setTimeout(() => {
+        finalizeLayer();
+        isPlaying = false;
+        if (statusDiv) statusDiv.textContent =
+          `Layer ${layers.length} saved (${getCategoryName(currentCategory)}). Upload another file to add a layer.`;
+        if (pauseButton) pauseButton.textContent = 'Pause';
+      }, 200);
+    };
 
-    startBeatClock();
+    // Resume AudioContext in case it was suspended (required on second+ play)
+    audioContext.resume().then(() => {
+      source.start(0);
+      isPlaying   = true;
+      isAnalyzing = false;
+      startBeatClock();
 
-    if (loadingDiv) loadingDiv.style.display = 'none';
-    if (statusDiv)  statusDiv.textContent = `Transcribing ${getCategoryName(currentCategory)} at ${BPM} BPM`;
-    if (pauseButton) pauseButton.textContent = 'Pause';
+      if (loadingDiv)  loadingDiv.style.display = 'none';
+      if (statusDiv)   statusDiv.textContent = `Transcribing ${getCategoryName(currentCategory)} at ${BPM} BPM`;
+      if (pauseButton) pauseButton.textContent = 'Pause';
+    });
+    return; // early return — the rest runs inside .then()
 
-    console.log(`Started transcribing ${currentCategory}`);
   } catch (error) {
     console.error("Meyda initialization error:", error);
     if (statusDiv)  statusDiv.textContent = '⚠️ Error initializing audio analyzer';
@@ -462,6 +507,15 @@ function processAudioFeatures(features, fundamentalHz) {
   if (features.perceptualSharpness) slice.perceptualSharpness.push(features.perceptualSharpness);
   if (fundamentalHz)              slice.pitchHz.push(fundamentalHz);
 
+  if (features.chroma) {
+    const chromaAvg = Array.isArray(features.chroma[0])
+      ? averageChroma(features.chroma)
+      : features.chroma;
+    const dominantIdx = chromaAvg.indexOf(Math.max(...chromaAvg));
+    const pc = indexToPitch(dominantIdx);
+    globalPitchAccumulator[pc] = (globalPitchAccumulator[pc] || 0) + 1;
+  }
+
   if (features.amplitudeSpectrum) {
     if (previousSpectrum) {
       let flux = 0;
@@ -481,6 +535,23 @@ function processAudioFeatures(features, fundamentalHz) {
   currentMeasureIndex = measureIndex;
 }
 
+function updateSongKey() {
+  if (Object.keys(globalPitchAccumulator).length === 0) return;
+
+  const tonic = Object.keys(globalPitchAccumulator)
+    .sort((a, b) => globalPitchAccumulator[b] - globalPitchAccumulator[a])[0];
+
+  if (tonic === detectedSongKey) return;
+
+  detectedSongKey  = tonic;
+  const tonicHue   = SCRIABIN_BASE_HUE[tonic] ?? 0;
+  songKeyHueOffset = -tonicHue;
+
+  console.log(`Song key: ${detectedSongKey}, hue offset: ${songKeyHueOffset}°`);
+  if (statusDiv) statusDiv.textContent =
+    `Key: ${detectedSongKey} | ${getCategoryName(currentCategory)} at ${BPM} BPM`;
+}
+
 // ----------------------------------------------------
 // MEASURE GENERATION
 // ----------------------------------------------------
@@ -488,6 +559,8 @@ function processAudioFeatures(features, fundamentalHz) {
 function generateMeasureFromBuffer(measureIndex) {
   const buffer = measureBuffers[measureIndex];
   if (!buffer) return;
+
+  updateSongKey();
 
   let notes = [];
 
@@ -522,11 +595,11 @@ function generateMeasureFromBuffer(measureIndex) {
     }
   }
 
-  // ── Detect mode ONCE for the whole measure ──────────────────────────────
+  // Detect mode once for the whole measure
   const measurePitches = notes.map(n => n.pitchClass).filter(Boolean);
   const detectedMode   = detectMode(measurePitches);
 
-  // ── Bake color into every note so draw() never recalculates it ──────────
+  // Bake color as {h,s,b} object — NOT a p5 color() call (safe outside draw loop)
   for (let note of notes) {
     note.color = pitchToColorAdvanced(
       note.pitchClass,
@@ -534,9 +607,32 @@ function generateMeasureFromBuffer(measureIndex) {
       note.instrument,
       { mode: detectedMode, intensity: note.intensity ?? 0.5 }
     );
+
+    // For synth gradient bands: also bake a second color for the right edge.
+    // Uses the next scale degree from the palette (or a small hue step if no palette).
+    // This keeps the gradient entirely within the palette's color family —
+    // no more rainbow bleed from unconstrained +60° hue sweeps.
+    if (INSTRUMENTS_BY_CATEGORY.synths.includes(note.instrument)) {
+      note.colorRight = getSynthGradientRight(
+        note.pitchClass, note.octave, note.instrument,
+        { mode: detectedMode, intensity: note.intensity ?? 0.5 }
+      );
+    }
   }
 
   measures.push({ notes: notes, measureNumber: measureIndex + 1, category: currentCategory });
+}
+
+// Called once when a layer finishes recording (source ends).
+// Saves the completed layer into the persistent layers[] stack.
+function finalizeLayer() {
+  if (measures.length === 0) return;
+  layers.push({
+    category : currentCategory,
+    measures : [...measures],
+    label    : getCategoryName(currentCategory),
+  });
+  console.log(`Layer saved: ${currentCategory}, ${measures.length} measures. Total layers: ${layers.length}`);
 }
 
 // ----------------------------------------------------
@@ -557,9 +653,7 @@ function processKeysCategory(notes, sliceIndex, rms, centroid, flux, chromaArray
     pitchClass = indexToPitch(i);
     octave     = mapToOctave(centroid);
     yNorm      = map(i, 0, 11, 0.85, 0.15);
-  } else {
-    return;
-  }
+  } else return;
 
   let instrument = 'piano';
   if (centroid < 400)       instrument = 'electricorgan';
@@ -570,8 +664,7 @@ function processKeysCategory(notes, sliceIndex, rms, centroid, flux, chromaArray
 
   notes.push({
     instrument: mapInstrumentName(instrument, 'keys'),
-    pitchClass,
-    octave,
+    pitchClass, octave,
     yPosition: yNorm,
     slice: sliceIndex,
     isSustained: rms > 0.01 && flux < 0.05,
@@ -582,22 +675,12 @@ function processKeysCategory(notes, sliceIndex, rms, centroid, flux, chromaArray
 function processPercussionCategory(notes, sliceIndex, rms, zcr, flux, rolloff, avgCentroid) {
   if (rms < 0.02) return;
 
-  let instrument = 'tambourine';
-  let yPos = 0.5;
+  let instrument = 'tambourine', yPos = 0.5;
 
-  if (zcr > 0.15 && flux > 8) {
-    instrument = 'snare';
-    yPos = 0.6;
-  } else if (rms > 0.08 && avgCentroid < 200) {
-    instrument = 'bassdrum';
-    yPos = 0.9;
-  } else if (zcr > 0.1 && flux > 5) {
-    instrument = 'hihat';
-    yPos = 0.4;
-  } else if (zcr > 0.2) {
-    instrument = 'tambourine';
-    yPos = 0.3;
-  }
+  if (zcr > 0.15 && flux > 8)              { instrument = 'snare';     yPos = 0.6; }
+  else if (rms > 0.08 && avgCentroid < 200) { instrument = 'bassdrum';  yPos = 0.9; }
+  else if (zcr > 0.1 && flux > 5)          { instrument = 'hihat';     yPos = 0.4; }
+  else if (zcr > 0.2)                      { instrument = 'tambourine'; yPos = 0.3; }
 
   notes.push({
     instrument: mapInstrumentName(instrument, 'percussion'),
@@ -628,8 +711,7 @@ function processWindCategory(notes, sliceIndex, rms, centroid, flux, chromaArray
 
   notes.push({
     instrument: mapInstrumentName(instrument, 'wind'),
-    pitchClass,
-    octave,
+    pitchClass, octave,
     yPosition: yNorm,
     slice: sliceIndex,
     isSustained: flux < 0.03
@@ -651,19 +733,16 @@ function processStringsCategory(notes, sliceIndex, rms, centroid, flux, zcr, chr
     pitchClass = dominantPitch(chromaAvg);
     octave     = mapToOctave(centroid);
     yNorm      = map(centroid, 200, 4000, 0.85, 0.15, true);
-  } else {
-    return;
-  }
+  } else return;
 
   let instrument = 'violin';
-  if (centroid < 400)       instrument = 'electricbass';
-  else if (centroid < 800)  instrument = 'cello';
-  else                      instrument = (zcr > 0.15 ? 'electricguitar' : 'acousticguitar');
+  if (centroid < 400)      instrument = 'electricbass';
+  else if (centroid < 800) instrument = 'cello';
+  else                     instrument = (zcr > 0.15 ? 'electricguitar' : 'acousticguitar');
 
   notes.push({
     instrument: mapInstrumentName(instrument, 'strings'),
-    pitchClass,
-    octave,
+    pitchClass, octave,
     yPosition: yNorm,
     slice: sliceIndex,
     isSustained: flux < 0.02,
@@ -694,12 +773,12 @@ function processSynthsCategory(notes, sliceIndex, rms, centroid, sharpness, flux
 
   notes.push({
     instrument: synthType,
-    pitchClass,
-    octave,
+    pitchClass, octave,
     yPosition: yNorm,
     slice: sliceIndex,
     isSustained: flux < 0.02,
-    intensity: sharpness || 1
+    intensity: sharpness || 1,
+    bandHeight: map(rms, 0, 0.3, 0.12, 0.28, true)
   });
 }
 
@@ -709,35 +788,15 @@ function processSynthsCategory(notes, sliceIndex, rms, centroid, sharpness, flux
 
 function mapInstrumentName(detectedInstrument, category) {
   const instrumentMap = {
-    'piano': 'piano',
-    'organ': 'electricorgan',
-    'harpsichord': 'keyboard',
-    'accordion': 'melodica',
-    'kick': 'bassdrum',
-    'snare': 'snare',
-    'hihat': 'hihat',
-    'tom': 'toms',
-    'cymbal': 'crashsplash',
-    'percussion': 'tambourine',
-    'flute': 'flute',
-    'trumpet': 'trumpet',
-    'saxophone': 'clarinet',
-    'clarinet': 'clarinet',
-    'oboe': 'oboe',
-    'horn': 'trumpet',
-    'violin': 'violin',
-    'cello': 'cello',
-    'bass': 'electricbass',
-    'guitar': 'acousticguitar',
-    'viola': 'viola',
-    'harp': 'acousticguitar',
-    'synth': 'synth',
-    'pad': 'pad',
-    'lead': 'lead',
-    'bass_synth': 'bass_synth',
-    'arpeggio': 'synth'
+    'piano':'piano','organ':'electricorgan','harpsichord':'keyboard',
+    'accordion':'melodica','kick':'bassdrum','snare':'snare','hihat':'hihat',
+    'tom':'toms','cymbal':'crashsplash','percussion':'tambourine',
+    'flute':'flute','trumpet':'trumpet','saxophone':'clarinet','clarinet':'clarinet',
+    'oboe':'oboe','horn':'trumpet','violin':'violin','cello':'cello',
+    'bass':'electricbass','guitar':'acousticguitar','viola':'viola',
+    'harp':'acousticguitar','synth':'synth','pad':'pad','lead':'lead',
+    'bass_synth':'bass_synth','arpeggio':'synth'
   };
-
   return instrumentMap[detectedInstrument] || detectedInstrument;
 }
 
@@ -784,7 +843,6 @@ function estimateBPM(duration) {
 
 function togglePause() {
   if (!source || !audioContext) return;
-
   if (isPlaying) {
     audioContext.suspend();
     pauseSongClock();
@@ -801,9 +859,14 @@ function togglePause() {
 }
 
 function resetComposition() {
-  measures        = [];
-  measureBuffers  = [];
-  currentMeasureIndex = 0;
+  measures               = [];
+  measureBuffers         = [];
+  layers                 = [];          // wipe all layers
+  currentMeasureIndex    = 0;
+  globalPitchAccumulator = {};
+  detectedSongKey        = null;
+  songKeyHueOffset       = 0;
+  paletteVariantIndex    = 0;
 
   resetSongClock();
   userHasSetBPM = false;
@@ -834,9 +897,7 @@ function downloadComposition() {
 
 function autoCorrelatePitch(timeDomainData, sampleRate) {
   const buf = new Float32Array(timeDomainData.length);
-  for (let i = 0; i < timeDomainData.length; i++) {
-    buf[i] = (timeDomainData[i] - 128) / 128;
-  }
+  for (let i = 0; i < timeDomainData.length; i++) buf[i] = (timeDomainData[i] - 128) / 128;
 
   let rms = 0;
   for (let i = 0; i < buf.length; i++) rms += buf[i] * buf[i];
@@ -845,15 +906,11 @@ function autoCorrelatePitch(timeDomainData, sampleRate) {
 
   let r1 = 0, r2 = buf.length - 1;
   const thresh = 0.2;
-  for (let i = 0; i < buf.length / 2; i++) {
-    if (Math.abs(buf[i]) < thresh) { r1 = i; break; }
-  }
-  for (let i = 1; i < buf.length / 2; i++) {
-    if (Math.abs(buf[buf.length - i]) < thresh) { r2 = buf.length - i; break; }
-  }
+  for (let i = 0; i < buf.length / 2; i++) { if (Math.abs(buf[i]) < thresh) { r1 = i; break; } }
+  for (let i = 1; i < buf.length / 2; i++) { if (Math.abs(buf[buf.length - i]) < thresh) { r2 = buf.length - i; break; } }
 
   const trimmed = buf.slice(r1, r2);
-  const size = trimmed.length;
+  const size    = trimmed.length;
   if (size < 32) return null;
 
   const c = new Float32Array(size).fill(0);
@@ -872,40 +929,27 @@ function autoCorrelatePitch(timeDomainData, sampleRate) {
   }
   if (maxpos <= 0) return null;
 
-  const x1 = maxpos - 1;
-  const x2 = maxpos;
-  const x3 = maxpos + 1;
+  const x1 = maxpos - 1, x2 = maxpos, x3 = maxpos + 1;
   if (x3 < c.length) {
     const y1 = c[x1], y2 = c[x2], y3 = c[x3];
     const a = (y1 + y3 - 2 * y2) / 2;
     const b = (y3 - y1) / 2;
-    if (a !== 0) {
-      const shift = -b / (2 * a);
-      const betterLag = x2 + shift;
-      return sampleRate / betterLag;
-    }
+    if (a !== 0) return sampleRate / (x2 + (-b / (2 * a)));
   }
-
   return sampleRate / maxpos;
 }
 
-function freqToMidi(freq) {
-  return 69 + 12 * Math.log2(freq / 440);
-}
+function freqToMidi(freq) { return 69 + 12 * Math.log2(freq / 440); }
 
 function midiToPitchClass(midi) {
   const names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
-  const idx = ((Math.round(midi) % 12) + 12) % 12;
-  return names[idx];
+  return names[((Math.round(midi) % 12) + 12) % 12];
 }
 
-function midiToOctave(midi) {
-  return Math.floor(Math.round(midi) / 12) - 1;
-}
+function midiToOctave(midi) { return Math.floor(Math.round(midi) / 12) - 1; }
 
 function freqToYNorm(freq) {
-  const fMin = 80;
-  const fMax = 1200;
+  const fMin = 80, fMax = 1200;
   const f = Math.max(fMin, Math.min(fMax, freq));
   const t = (Math.log(f) - Math.log(fMin)) / (Math.log(fMax) - Math.log(fMin));
   return 1 - t;
@@ -917,23 +961,59 @@ function freqToYNorm(freq) {
 
 function draw() {
   background(0, 0, 100);
-  if (isAnalyzing)         drawLoadingOverlay();
-  if (measures.length > 0) drawScrollableGrid();
+  if (isAnalyzing) drawLoadingOverlay();
+  // Show grid if ANY layer has data — not just the active recording
+  const hasAnything = layers.length > 0 || measures.length > 0;
+  if (hasAnything) drawScrollableGrid();
 }
 
 function drawScrollableGrid() {
-  const totalRows    = Math.ceil(measures.length / columns);
+  // The composition = all finished layers + the currently-recording layer.
+  // We find the maximum measure count across all sources to size the canvas.
+  const allLayerMeasures = [...layers.map(l => l.measures), measures];
+  const maxMeasures = Math.max(...allLayerMeasures.map(m => m.length), 0);
+
+  if (maxMeasures === 0) return;
+
+  const totalRows    = Math.ceil(maxMeasures / columns);
   const totalHeight  = totalRows * cellH;
   const neededHeight = max(windowHeight, totalHeight);
   if (height !== neededHeight) resizeCanvas(width, neededHeight);
 
-  for (let i = 0; i < measures.length; i++) {
+  // Draw grid backgrounds + grid lines FIRST (one pass)
+  for (let i = 0; i < maxMeasures; i++) {
     const col = i % columns;
     const row = Math.floor(i / columns);
     const x   = col * cellW;
     const y   = row * cellH;
+    push();
+    translate(x, y);
+    fill(0, 0, 100);
+    noStroke();
+    rect(0, 0, cellW, cellW);
+    stroke(0, 0, 88); strokeWeight(0.5);
+    for (let b = 1; b <= 3; b++) line((cellW / 4) * b, 0, (cellW / 4) * b, cellW);
+    stroke(0, 0, 92);
+    line(0, cellW * 0.5, cellW, cellW * 0.5);
+    noStroke();
+    pop();
+  }
+
+  // Draw each layer on top — older (finished) layers first, then active layer
+  for (const layer of layers) {
+    for (let i = 0; i < layer.measures.length; i++) {
+      const col = i % columns;
+      const row = Math.floor(i / columns);
+      drawMeasureNotes(layer.measures[i], col * cellW, row * cellH, cellW, false);
+    }
+  }
+
+  // Active (currently-recording) layer — draw with playhead highlight
+  for (let i = 0; i < measures.length; i++) {
+    const col = i % columns;
+    const row = Math.floor(i / columns);
     const isCurrent = (i === currentMeasureIndex) && isPlaying;
-    drawMeasure(measures[i], x, y, cellW, isCurrent);
+    drawMeasureNotes(measures[i], col * cellW, row * cellH, cellW, isCurrent);
   }
 
   autoScrollToCurrentMeasure();
@@ -946,29 +1026,30 @@ function autoScrollToCurrentMeasure() {
   if (targetY > 0) window.scrollTo({ top: targetY, behavior: 'smooth' });
 }
 
-function drawMeasure(measure, x, y, size, isCurrent = false) {
+// Draws only the notes for a measure (no background or grid — handled separately).
+// This lets multiple layers composite onto the same grid cell.
+function drawMeasureNotes(measure, x, y, size, isCurrent = false) {
   push();
   translate(x, y);
 
-  fill(0, 0, 100);
-  noStroke();
-  rect(0, 0, size, size);
+  const isSynthMeasure = measure.category === 'synths';
 
-  // 4 vertical beat lines
-  stroke(0, 0, 88);
-  strokeWeight(0.5);
-  for (let i = 1; i <= 3; i++) {
-    const lineX = (size / 4) * i;
-    line(lineX, 0, lineX, size);
+  if (isSynthMeasure) {
+    let synthNotes = [...measure.notes];
+    if (synthNotes.length > 3) {
+      synthNotes.sort((a, b) => (a.yPosition || 0.5) - (b.yPosition || 0.5));
+      const lo  = synthNotes[0];
+      const hi  = synthNotes[synthNotes.length - 1];
+      const mid = synthNotes[Math.floor(synthNotes.length / 2)];
+      synthNotes = [lo, mid, hi];
+    }
+    synthNotes.sort((a, b) => (b.yPosition || 0.5) - (a.yPosition || 0.5));
+    for (let note of synthNotes) drawSynthBlock(note, size);
+  } else {
+    let notes = [...measure.notes];
+    notes.sort((a, b) => (a.yPosition || 0.5) - (b.yPosition || 0.5));
+    for (let i = 0; i < notes.length; i++) drawNote(notes[i], size, i, notes.length);
   }
-  // Horizontal midline for pitch reference
-  stroke(0, 0, 92);
-  line(0, size * 0.5, size, size * 0.5);
-  noStroke();
-
-  let notes = [...measure.notes];
-  notes.sort((a, b) => (a.yPosition || 0.5) - (b.yPosition || 0.5));
-  for (let i = 0; i < notes.length; i++) drawNote(notes[i], size, i, notes.length);
 
   if (isCurrent) {
     noFill();
@@ -980,6 +1061,67 @@ function drawMeasure(measure, x, y, size, isCurrent = false) {
 
   pop();
 }
+
+// ============================================================
+// COLOR RESOLUTION — called INSIDE draw loop
+// ============================================================
+// note.color is stored as a plain {h,s,b} object (safe to create outside draw).
+// Here, inside draw(), we resolve it to an actual p5 color using the current
+// HSB colorMode(360, 100, 100, 255).
+
+function resolveNoteColor(note) {
+  const c = note.color;
+  if (!c) return color(0, 0, 60);
+  if (typeof c === 'object' && 'h' in c) {
+    return color(c.h, c.s, c.b);
+  }
+  // Fallback: already a p5 color (shouldn't happen, but safe)
+  return c;
+}
+
+// ============================================================
+// SYNTH BLOCK RENDERER
+// ============================================================
+
+function drawSynthBlock(note, size) {
+  if (!note.color) return;
+
+  // Lerp in RGB space — avoids HSB lerpColor sweeping through the hue wheel.
+  // e.g. lerping purple→green in HSB goes through blue/cyan/teal = rainbow.
+  // RGB lerp goes directly between the two colors with no hue detour.
+  const cL_hsb = note.color;
+  const cR_hsb = note.colorRight || { h: (cL_hsb.h + 20) % 360, s: cL_hsb.s, b: cL_hsb.b };
+
+  const [r1, g1, b1] = hsbToRgb(cL_hsb.h, cL_hsb.s / 100, cL_hsb.b / 100);
+  const [r2, g2, b2] = hsbToRgb(cR_hsb.h, cR_hsb.s / 100, cR_hsb.b / 100);
+
+  const yCenter   = constrain((note.yPosition || 0.5) * size, size * 0.05, size * 0.95);
+  const bandH     = (note.bandHeight || 0.08) * size;
+  const halfBandH = bandH / 2;
+  const yTop      = yCenter - halfBandH;
+  const yBottom   = yCenter + halfBandH;
+
+  noFill();
+  strokeWeight(1);
+  colorMode(RGB, 255);
+
+  for (let x = 0; x <= size; x++) {
+    const t = x / size;
+    stroke(
+      r1 + (r2 - r1) * t,
+      g1 + (g2 - g1) * t,
+      b1 + (b2 - b1) * t
+    );
+    line(x, yTop, x, yBottom);
+  }
+
+  colorMode(HSB, 360, 100, 100, 255);
+  noStroke();
+}
+
+// ----------------------------------------------------
+// NOTE DRAWING (non-synth instruments)
+// ----------------------------------------------------
 
 function drawNote(note, size, noteIndex, totalNotes) {
   const def = SHAPE_REGISTRY[note.instrument];
@@ -993,26 +1135,23 @@ function drawNote(note, size, noteIndex, totalNotes) {
   else                              y = size * 0.5;
   y = constrain(y, size * 0.1, size * 0.9);
 
-  // ── Read pre-baked color — no recalculation, no flashing ────────────────
-  const noteColor = note.color || color(0, 0, 60);
+  // Resolve {h,s,b} → p5 color inside draw()
+  const noteColor = resolveNoteColor(note);
 
   const baseSize = size * 0.10;
   let shapeSize  = baseSize;
   if (def.stringInstrument) shapeSize = note.plucked ? baseSize * 0.7 : baseSize;
 
-  if (def.gradient) {
-    drawSynthShape(x, y, baseSize * 2, noteColor);
-  } else {
-    drawInstrumentShape(note.instrument, x, y, shapeSize, noteColor);
-    if (def.elongated) {
-      const shouldDrawLine = note.isSustained || (def.stringInstrument && !note.plucked);
-      if (shouldDrawLine) {
-        stroke(noteColor);
-        strokeWeight(1.5);
-        strokeCap(ROUND);
-        line(0, y, size, y);
-        noStroke();
-      }
+  drawInstrumentShape(note.instrument, x, y, shapeSize, noteColor);
+
+  if (def.elongated) {
+    const shouldDrawLine = note.isSustained || (def.stringInstrument && !note.plucked);
+    if (shouldDrawLine) {
+      stroke(noteColor);
+      strokeWeight(1.5);
+      strokeCap(ROUND);
+      line(0, y, size, y);
+      noStroke();
     }
   }
 }
@@ -1022,7 +1161,6 @@ function drawInstrumentShape(instrument, x, y, size, col) {
   if (img && img.width > 0 && img.height > 0) {
     push();
     imageMode(CENTER);
-    // In HSB mode, tint() takes HSB values matching the current colorMode
     tint(hue(col), saturation(col), brightness(col), 255);
     image(img, x, y, size, size);
     pop();
@@ -1065,16 +1203,6 @@ function drawInstrumentShape(instrument, x, y, size, col) {
   }
 }
 
-function drawSynthShape(x, y, size, col) {
-  push();
-  let h = hue(col), s = saturation(col), b = brightness(col);
-  for (let r = size; r > 0; r -= 2) {
-    fill(h, s, b, map(r, 0, size, 50, 0));
-    ellipse(x, y, r * 2, r * 0.8);
-  }
-  pop();
-}
-
 function drawLoadingOverlay() {
   push();
   fill(255, 255, 255, 220);
@@ -1093,141 +1221,438 @@ function drawLoadingOverlay() {
   pop();
 }
 
+
 // ============================================================
 // PITCH-TO-COLOR SYSTEM
 // ============================================================
 //
-// Theoretical foundations:
-//  - Scriabin's circle-of-fifths color wheel: hue follows harmonic
-//    distance, not chromatic distance, so modulation looks smooth
-//  - Frequency-spectrum analogy: pitch class → hue, octave → brightness
-//  - Modal quality modifier: major warms & saturates, minor cools & desaturates
-//  - Percussion fixed to warm red-orange-yellow palette (brightness only)
+// note.color is stored as plain {h, s, b} — safe outside draw().
+// It is resolved to a real p5 color() inside resolveNoteColor()
+// which is called only from drawNote / drawSynthBlock (inside draw loop).
 //
-// Designed for p5.js colorMode(HSB, 360, 100, 100, 255)
+// THREE-LAYER PIPELINE:
+//  1. User palette (scalePalette)  →  pitch → scale degree → curated HSB
+//  2. Song key offset              →  rotates Scriabin circle to tonic = 0°
+//  3. Scriabin + modal modifier    →  hue/sat/bri tuned per mode character
 // ============================================================
 
-// Circle of fifths ordering reference
-const CIRCLE_OF_FIFTHS_ORDER = [
-  'C', 'G', 'D', 'A', 'E', 'B',
-  'F#', 'C#', 'G#', 'D#', 'A#', 'F'
-];
+const CIRCLE_OF_FIFTHS_ORDER = ['C','G','D','A','E','B','F#','C#','G#','D#','A#','F'];
 
-// Scriabin-inspired hue table, arranged by circle of fifths.
-// Harmonically related notes are chromatically adjacent in HSB space
-// → smooth colour transitions during modulation.
 const SCRIABIN_BASE_HUE = {
-  'C':  0,    // Red            (Scriabin: red)
-  'G':  30,   // Red-Orange     (Scriabin: orange-rose)
-  'D':  60,   // Yellow         (Scriabin: yellow)
-  'A':  90,   // Yellow-Green   (Scriabin: green)
-  'E':  150,  // Green          (Scriabin: sky-blue/pearly)
-  'B':  195,  // Cyan           (Scriabin: steely blue)
-  'F#': 225,  // Azure          (Scriabin: bright blue)
-  'C#': 255,  // Violet-Blue    (Scriabin: violet)
-  'G#': 285,  // Purple
-  'D#': 310,  // Magenta        (Scriabin: steel with metallic sheen)
-  'A#': 340,  // Red-Magenta
-  'F':  355,  // Deep Red
+  'C':  0,   'G':  30,  'D':  60,  'A':  90,
+  'E':  150, 'B':  195, 'F#': 225, 'C#': 255,
+  'G#': 285, 'D#': 310, 'A#': 340, 'F':  355,
 };
 
-const ENHARMONIC = {
-  'Db': 'C#', 'Eb': 'D#', 'Gb': 'F#', 'Ab': 'G#', 'Bb': 'A#'
-};
+const ENHARMONIC = { 'Db':'C#','Eb':'D#','Gb':'F#','Ab':'G#','Bb':'A#' };
+function resolveEnharmonic(p) { return ENHARMONIC[p] || p; }
 
-function resolveEnharmonic(pitchClass) {
-  return ENHARMONIC[pitchClass] || pitchClass;
-}
-
-// Modal modifiers
-// hueShift: + = warmer (toward yellow/red), − = cooler (toward blue)
-// satShift: + = more vivid,                 − = more muted
-// briShift: + = brighter,                   − = darker
 const MODAL_MODIFIERS = {
-  ionian:    { h: +12, s: +10, b: +5  }, // Major — bright, warm, confident
-  mixolydian:{ h:  +8, s:  +7, b: +3  }, // Dominant 7 feel — bluesy warmth
-  lydian:    { h: +15, s: +12, b: +8  }, // Raised 4th — dreamy, luminous
-  dorian:    { h:  -5, s:  +5, b:  0  }, // Minor with raised 6 — bittersweet
-  aeolian:   { h: -12, s:  -8, b: -5  }, // Natural minor — melancholic, cool
-  phrygian:  { h: -18, s: -12, b: -8  }, // Flat 2 — tense, dark, Spanish
-  locrian:   { h: -25, s: -18, b: -12 }, // Flat 2 & 5 — dissonant, uncomfortable
+  ionian:    { h: +12, s: +15, b:  +8 },
+  mixolydian:{ h:  +8, s: +12, b:  +5 },
+  lydian:    { h: +18, s: +18, b: +12 },
+  dorian:    { h:  -5, s:  +8, b:  +2 },
+  aeolian:   { h: -12, s:  -5, b:  -5 },
+  phrygian:  { h: -20, s: -10, b: -10 },
+  locrian:   { h: -28, s: -20, b: -15 },
 };
 
-const BASE_SATURATION = 75;
-const BASE_BRIGHTNESS = 72;
+const BASE_SATURATION = 92;
+const BASE_BRIGHTNESS = 85;
 
 function octaveModifiers(octave) {
-  const o = constrain(octave || 4, 1, 8);
-  const t = map(o, 1, 8, -1, 1);
+  const o = Math.min(8, Math.max(1, octave || 4));
+  const t = (o - 1) / 7; // 0.0 at octave 1, 1.0 at octave 8
   return {
-    satDelta: map(t, -1, 1, -15, +15),
-    brDelta:  map(t, -1, 1, -25, +25),
+    satDelta: t * 20 - 12,
+    brDelta:  t * 43 - 28,
   };
 }
 
-// Percussion fixed warm palette
+// Plain clamp + linear map — safe outside draw()
+function clampVal(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+
 const PERCUSSION_HUE = {
-  kick:        5,  // deep red
-  bassdrum:    5,
-  snare:      20,  // red-orange
-  toms:       35,  // orange
-  hihat:      50,  // yellow-orange
-  crashsplash:55,
-  tambourine: 45,
-  clap:       25,
+  kick: 5, bassdrum: 5, snare: 20, toms: 35,
+  hihat: 50, crashsplash: 55, tambourine: 45, clap: 25,
 };
 
-// ----------------------------------------------------
-// MAIN COLOR FUNCTION
-// pitchToColorAdvanced(pitchClass, octave, instrument, options)
-//
-// options = {
-//   mode:      'ionian'|'dorian'|'phrygian'|'lydian'|'mixolydian'|'aeolian'|'locrian'
-//   quality:   'maj'|'min'   (fallback if mode not given)
-//   intensity: 0–1 float     (percussion brightness)
-// }
-// ----------------------------------------------------
+// ── MAIN COLOR FUNCTION ───────────────────────────────────────────────────────
+// Returns a plain {h,s,b} object. NEVER calls p5's color() here.
+// Resolving to a p5 color happens inside draw() via resolveNoteColor().
+
 function pitchToColorAdvanced(pitchClass, octave, instrument, options = {}) {
 
-  // ── Percussion path ────────────────────────────────────────────────────
+  // Percussion — warm fixed palette, no pitch involved
   const isPercussion = INSTRUMENTS_BY_CATEGORY.percussion.includes(instrument);
   if (isPercussion) {
     const h = PERCUSSION_HUE[instrument] ?? 20;
-    const s = constrain(map(options.intensity ?? 0.5, 0, 1, 40, 95), 40, 95);
-    const b = constrain(map(octave || 4, 1, 8, 35, 90), 35, 90);
-    return color(h, s, b);
+    const intensity = options.intensity ?? 0.5;
+    const s = clampVal(55 + intensity * 45, 55, 100);
+    const b = clampVal(40 + (octave || 4) * 7.8, 40, 95);
+    return { h, s, b };
   }
 
-  // ── Pitched instrument path ────────────────────────────────────────────
-  if (!pitchClass) return color(0, 0, 60);
+  if (!pitchClass) return { h: 0, s: 0, b: 60 };
 
   const canonical = resolveEnharmonic(pitchClass);
-  const baseHue   = SCRIABIN_BASE_HUE[canonical];
-  if (baseHue === undefined) return color(0, 0, 50);
 
-  let hueValue = baseHue;
+  // ── Layer 1: User palette path ────────────────────────────────────────────
+  if (scalePalette && scalePalette.length >= 7) {
+    const entry = pitchToPaletteHSB(canonical, scalePalette);
+    if (entry) {
+      const { brDelta } = octaveModifiers(octave);
+      return {
+        h: entry.h,
+        s: entry.s,
+        b: clampVal(entry.b + brDelta * 0.5, 25, 100),
+      };
+    }
+  }
+
+  // ── Layer 2+3: Scriabin + modal fallback ──────────────────────────────────
+  const baseHue = SCRIABIN_BASE_HUE[canonical];
+  if (baseHue === undefined) return { h: 0, s: 0, b: 50 };
+
+  let hueValue = (baseHue + songKeyHueOffset + 360) % 360;
 
   const { satDelta, brDelta } = octaveModifiers(octave);
   let sat = BASE_SATURATION + satDelta;
   let bri = BASE_BRIGHTNESS  + brDelta;
 
-  // Apply modal modifier
   const mod = MODAL_MODIFIERS[options.mode] || null;
   if (mod) {
     hueValue = (hueValue + mod.h + 360) % 360;
-    sat = constrain(sat + mod.s, 20, 100);
-    bri = constrain(bri + mod.b, 20, 100);
+    sat = clampVal(sat + mod.s, 30, 100);
+    bri = clampVal(bri + mod.b, 30, 100);
   }
 
-  return color(hueValue, sat, bri);
+  return { h: hueValue, s: sat, b: bri };
 }
 
-// ----------------------------------------------------
-// MODE DETECTION
-// Pass an array of pitchClass strings from one measure;
-// returns the most likely Western mode string.
-// Uses Hamming similarity against modal interval templates.
-// ----------------------------------------------------
+// ── SYNTH GRADIENT RIGHT-EDGE COLOR ──────────────────────────────────────────
+// Returns the {h,s,b} for the right edge of a synth gradient band.
+//
+// When a user palette is active: finds this note's scale degree, then picks
+// the *next* degree's color — so the gradient sweeps between two adjacent
+// palette swatches. This is entirely within the palette family, no rainbow.
+//
+// When no palette: uses a modest +25° hue nudge (not +60°) so adjacent
+// bands stay visually related rather than leaping across the spectrum.
+//
+// Safe to call outside draw() — no p5 color() call.
+
+function getSynthGradientRight(pitchClass, octave, instrument, options = {}) {
+  // Get the LEFT color first — right edge is a lightness/saturation variant of it,
+  // NOT a different hue. This guarantees the gradient never sweeps across hues.
+  // The visual effect is a soft light→dark or vivid→muted sheen, not a rainbow.
+  const left = pitchToColorAdvanced(pitchClass, octave, instrument, options);
+
+  if (scalePalette && scalePalette.length >= 7) {
+    // With palette: right edge is the same hue, slightly lighter and less saturated
+    // — creates a luminous highlight sheen while staying firmly in the palette color.
+    return {
+      h: left.h,
+      s: clampVal(left.s - 18, 20, 100),
+      b: clampVal(left.b + 14, 25, 100),
+    };
+  }
+
+  // Without palette: same — just a brightness lift, no hue change
+  return {
+    h: left.h,
+    s: clampVal(left.s - 15, 20, 100),
+    b: clampVal(left.b + 18, 25, 100),
+  };
+}
+
+
+// ============================================================
+// CURATED LOCAL PALETTE SYSTEM
+// ============================================================
+//
+// 7 modes × 7 scale degrees. Colors are {h,s,b} in HSB (360,100,100).
+// Designed so degree I is the warmest/most grounded, and the overall
+// palette character matches each mode's emotional quality.
+// All palettes are KEY-AGNOSTIC — key transposition is applied via hue rotation.
+//
+// Palette design rationale:
+//   Ionian    — warm gold/amber, analogic spread, open + resolved
+//   Dorian    — teal/coral balance, bittersweet
+//   Phrygian  — deep crimson/purple/olive, tense + dark (triadic contrast)
+//   Lydian    — gold/sky/lavender, luminous + dreamy
+//   Mixolydian— burnt orange/indigo, bluesy warmth with contrast
+//   Aeolian   — steel blue/dusty rose, melancholic complement
+//   Locrian   — muted/gray, desaturated + uncomfortable
+// ============================================================
+
+const MODE_PALETTES = {
+  ionian: [
+    { h: 38,  s: 85, b: 97 },
+    { h: 60,  s: 75, b: 93 },
+    { h: 82,  s: 70, b: 88 },
+    { h: 18,  s: 80, b: 96 },
+    { h: 5,   s: 82, b: 94 },
+    { h: 48,  s: 72, b: 91 },
+    { h: 95,  s: 65, b: 85 },
+  ],
+  dorian: [
+    { h: 175, s: 68, b: 82 },
+    { h: 158, s: 60, b: 78 },
+    { h: 195, s: 72, b: 75 },
+    { h: 10,  s: 70, b: 90 },
+    { h: 165, s: 65, b: 80 },
+    { h: 28,  s: 65, b: 88 },
+    { h: 185, s: 75, b: 72 },
+  ],
+  phrygian: [
+    { h: 345, s: 85, b: 72 },
+    { h: 28,  s: 70, b: 78 },
+    { h: 270, s: 60, b: 65 },
+    { h: 355, s: 78, b: 68 },
+    { h: 85,  s: 55, b: 62 },
+    { h: 260, s: 65, b: 60 },
+    { h: 15,  s: 72, b: 70 },
+  ],
+  lydian: [
+    { h: 52,  s: 78, b: 99 },
+    { h: 70,  s: 65, b: 96 },
+    { h: 220, s: 55, b: 95 },
+    { h: 35,  s: 82, b: 98 },
+    { h: 200, s: 50, b: 97 },
+    { h: 58,  s: 70, b: 94 },
+    { h: 240, s: 45, b: 92 },
+  ],
+  mixolydian: [
+    { h: 22,  s: 82, b: 90 },
+    { h: 42,  s: 75, b: 88 },
+    { h: 235, s: 60, b: 80 },
+    { h: 12,  s: 78, b: 88 },
+    { h: 248, s: 55, b: 78 },
+    { h: 32,  s: 70, b: 86 },
+    { h: 225, s: 58, b: 76 },
+  ],
+  aeolian: [
+    { h: 210, s: 65, b: 72 },
+    { h: 228, s: 55, b: 68 },
+    { h: 340, s: 45, b: 78 },
+    { h: 218, s: 60, b: 70 },
+    { h: 200, s: 58, b: 75 },
+    { h: 350, s: 40, b: 72 },
+    { h: 232, s: 50, b: 65 },
+  ],
+  locrian: [
+    { h: 280, s: 35, b: 52 },
+    { h: 68,  s: 45, b: 58 },
+    { h: 295, s: 30, b: 48 },
+    { h: 78,  s: 40, b: 55 },
+    { h: 310, s: 28, b: 44 },
+    { h: 55,  s: 35, b: 52 },
+    { h: 265, s: 32, b: 46 },
+  ],
+};
+
+// How many hue degrees to rotate each key's palette so its tonic
+// feels "correct" relative to the Scriabin circle.
+const KEY_HUE_ROTATION = {
+  'C':  0,   'G':  30,  'D':  60,  'A':  90,
+  'E':  150, 'B':  195, 'F#': 225, 'C#': 255,
+  'G#': 285, 'D#': 310, 'A#': 340, 'F':  355,
+  'Db': 255, 'Eb': 310, 'Gb': 225, 'Ab': 285, 'Bb': 340,
+};
+
+// Build a key-transposed palette from local curated data.
+// Returns array of 7 {h,s,b} objects with metadata attached.
+function buildLocalPalette(rootKey, modeName) {
+  const baseColors = MODE_PALETTES[modeName] || MODE_PALETTES.ionian;
+  const rotation   = KEY_HUE_ROTATION[rootKey] ?? 0;
+
+  const palette = baseColors.map(c => ({
+    h: (c.h + rotation) % 360,
+    s: c.s,
+    b: c.b,
+  }));
+
+  palette._rootKey   = rootKey;
+  palette._modeName  = modeName;
+  palette._intervals = MODE_INTERVALS[modeName] || MODE_INTERVALS.ionian;
+
+  return palette;
+}
+
+// Map a pitch class to its palette entry as {h,s,b}.
+// Safe to call outside draw() — no p5 color() call.
+function pitchToPaletteHSB(pitchClass, palette) {
+  if (!palette || palette.length < 7) return null;
+
+  const rootKey   = palette._rootKey   || 'C';
+  const intervals = palette._intervals || MODE_INTERVALS.ionian;
+  const rootSemi  = PITCH_TO_SEMITONE[rootKey] ?? 0;
+  const pitchSemi = PITCH_TO_SEMITONE[resolveEnharmonic(pitchClass)];
+
+  let degreeIndex = 0;
+
+  if (pitchSemi !== undefined) {
+    const dist = ((pitchSemi - rootSemi) + 12) % 12;
+    let bestDeg = 0, bestGap = 12;
+    for (let i = 0; i < intervals.length; i++) {
+      const gap        = Math.abs(intervals[i] - dist);
+      const wrappedGap = Math.min(gap, 12 - gap);
+      if (wrappedGap < bestGap) { bestGap = wrappedGap; bestDeg = i; }
+    }
+    degreeIndex = bestDeg;
+  }
+
+  return palette[degreeIndex]; // {h, s, b}
+}
+
+// ── PALETTE APPLICATION — The Color API with variant seeds ───────────────────
+//
+// Each click of "Generate Palette" picks a DIFFERENT seed hue by offsetting
+// the base Scriabin hue by a variant step. This gives genuinely different
+// palettes for the same key+mode combination, not just the same colors.
+//
+// Variant seed offsets (degrees added to the Scriabin base hue):
+//   variant 0 → base hue (canonical Scriabin)
+//   variant 1 → +40°  (warm shift)
+//   variant 2 → +80°  (brighter shift)
+//   variant 3 → +160° (complementary shift)
+//   variant 4 → +220° (cool shift)
+//   repeats cyclically
+
+const VARIANT_OFFSETS = [0, 40, 80, 160, 220];
+
+// Color API scheme modes — match musical mode character
+const MODE_TO_COLOR_SCHEME = {
+  ionian:     'analogic',
+  lydian:     'analogic',
+  mixolydian: 'analogic-complement',
+  dorian:     'analogic-complement',
+  aeolian:    'complement',
+  phrygian:   'triad',
+  locrian:    'triad',
+};
+
+async function fetchColorAPIPalette(rootKey, modeName, swatchContainer, statusEl) {
+  const scrabiHue  = SCRIABIN_BASE_HUE[rootKey] ?? 0;
+  const mod        = MODAL_MODIFIERS[modeName] || { h: 0, s: 0, b: 0 };
+  const variantOff = VARIANT_OFFSETS[paletteVariantIndex % VARIANT_OFFSETS.length];
+
+  const seedHue = Math.round((scrabiHue + mod.h + variantOff + 360) % 360);
+  const clamp   = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const seedSat = Math.round(clamp(62 + mod.s * 0.4, 40, 88));
+  const seedLit = Math.round(clamp(52 + mod.b * 0.3, 30, 72));
+
+  const scheme = MODE_TO_COLOR_SCHEME[modeName] || 'analogic';
+  const url    = `https://www.thecolorapi.com/scheme?hsl=hsl(${seedHue},${seedSat}%,${seedLit}%)&mode=${scheme}&count=7&format=json`;
+
+  if (statusEl) statusEl.textContent = `Fetching palette (variant ${paletteVariantIndex + 1})…`;
+
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    const palette = data.colors.map(c => {
+      // Convert API HSL to our HSB storage format
+      const h   = c.hsl.h;
+      const s   = Math.min(c.hsl.s, 88);
+      const l   = Math.min(Math.max(c.hsl.l, 30), 75);
+      const hsb = hslToHsb(h, s / 100, l / 100);
+      return { h: hsb[0], s: hsb[1], b: hsb[2] };
+    });
+
+    palette._rootKey   = rootKey;
+    palette._modeName  = modeName;
+    palette._intervals = MODE_INTERVALS[modeName] || MODE_INTERVALS.ionian;
+
+    scalePalette     = palette;
+    userDefinedKey   = rootKey;
+    userDefinedMode  = modeName;
+    songKeyHueOffset = -scrabiHue;
+
+    // Advance variant for next click
+    paletteVariantIndex++;
+
+    renderSwatches(palette, swatchContainer);
+    if (statusEl) statusEl.textContent = `Palette: ${rootKey} ${modeName} — click again for a new variant`;
+    console.log(`Color API palette loaded: ${rootKey} ${modeName} variant ${paletteVariantIndex} (${scheme}, seed hue ${seedHue}°)`);
+
+  } catch (err) {
+    console.warn('Color API unavailable, using local palette:', err.message);
+    applyLocalPalette(rootKey, modeName, swatchContainer, statusEl);
+  }
+}
+
+// Local palette fallback — used when Color API is unreachable
+function applyLocalPalette(rootKey, modeName, swatchContainer, statusEl) {
+  const palette = buildLocalPalette(rootKey, modeName);
+  scalePalette           = palette;
+  userDefinedKey         = rootKey;
+  userDefinedMode        = modeName;
+  songKeyHueOffset       = -(SCRIABIN_BASE_HUE[rootKey] ?? 0);
+  paletteVariantIndex++;
+  renderSwatches(palette, swatchContainer);
+  if (statusEl) statusEl.textContent = `Palette: ${rootKey} ${modeName} (local)`;
+}
+
+// HSL (h:0-360, s:0-1, l:0-1) → [h, s%, b%] in HSB (0-360, 0-100, 0-100)
+function hslToHsb(h, s, l) {
+  const b   = l + s * Math.min(l, 1 - l);
+  const sb  = b === 0 ? 0 : 2 * (1 - l / b);
+  return [Math.round(h), Math.round(sb * 100), Math.round(b * 100)];
+}
+
+// Render swatches — {h,s,b} converted to RGB for CSS display
+function renderSwatches(palette, container) {
+  if (!container) return;
+  container.innerHTML = '';
+  const DEGREE_NAMES = ['I','II','III','IV','V','VI','VII'];
+  palette.slice(0, 7).forEach((col, i) => {
+    const rgb    = hsbToRgb(col.h, col.s / 100, col.b / 100);
+    const swatch = document.createElement('div');
+    swatch.className   = 'palette-swatch';
+    swatch.style.background = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+    swatch.style.width  = '28px';
+    swatch.style.height = '28px';
+    swatch.style.borderRadius = '4px';
+    swatch.style.display = 'inline-block';
+    swatch.style.margin  = '2px';
+    swatch.title = DEGREE_NAMES[i] || i;
+    container.appendChild(swatch);
+  });
+}
+
+// Build fallback palette — now just delegates to buildLocalPalette
+function buildFallbackPalette(rootKey, modeName) {
+  return buildLocalPalette(rootKey, modeName);
+}
+
+
+// ============================================================
+// SCALE / MODE SYSTEM
+// ============================================================
+
+const MODE_INTERVALS = {
+  ionian:    [0, 2, 4, 5, 7, 9, 11],
+  dorian:    [0, 2, 3, 5, 7, 9, 10],
+  phrygian:  [0, 1, 3, 5, 7, 8, 10],
+  lydian:    [0, 2, 4, 6, 7, 9, 11],
+  mixolydian:[0, 2, 4, 5, 7, 9, 10],
+  aeolian:   [0, 2, 3, 5, 7, 8, 10],
+  locrian:   [0, 1, 3, 5, 6, 8, 10],
+};
+
+const SEMITONE_TO_PITCH = [
+  'C','C#','D','D#','E','F','F#','G','G#','A','A#','B'
+];
+
+const PITCH_TO_SEMITONE = {
+  'C':0,'C#':1,'D':2,'D#':3,'E':4,'F':5,
+  'F#':6,'G':7,'G#':8,'A':9,'A#':10,'B':11,
+  'Db':1,'Eb':3,'Gb':6,'Ab':8,'Bb':10
+};
+
 const MODAL_TEMPLATES = {
   ionian:    [1,0,1,0,1,1,0,1,0,1,0,1],
   dorian:    [1,0,1,1,0,1,0,1,0,1,1,0],
@@ -1238,31 +1663,20 @@ const MODAL_TEMPLATES = {
   locrian:   [1,1,0,1,0,1,1,0,1,0,1,0],
 };
 
-const PITCH_TO_SEMITONE = {
-  'C':0,'C#':1,'D':2,'D#':3,'E':4,'F':5,
-  'F#':6,'G':7,'G#':8,'A':9,'A#':10,'B':11,
-  'Db':1,'Eb':3,'Gb':6,'Ab':8,'Bb':10
-};
-
 function detectMode(pitchClasses) {
   if (!pitchClasses || pitchClasses.length < 3) return null;
 
-  // Find tonic candidate (most frequent pitch class)
   const freq = {};
   for (const p of pitchClasses) freq[p] = (freq[p] || 0) + 1;
-  const tonic = Object.keys(freq).sort((a, b) => freq[b] - freq[a])[0];
+  const tonic     = Object.keys(freq).sort((a, b) => freq[b] - freq[a])[0];
   const tonicSemi = PITCH_TO_SEMITONE[tonic] ?? 0;
 
-  // Build 12-bit presence vector relative to tonic
   const present = new Array(12).fill(0);
   for (const p of pitchClasses) {
     const semi = PITCH_TO_SEMITONE[p];
-    if (semi !== undefined) {
-      present[((semi - tonicSemi) + 12) % 12] = 1;
-    }
+    if (semi !== undefined) present[((semi - tonicSemi) + 12) % 12] = 1;
   }
 
-  // Score against each modal template via Hamming similarity
   let bestMode = 'ionian', bestScore = -1;
   for (const [mode, template] of Object.entries(MODAL_TEMPLATES)) {
     let score = 0;
@@ -1277,6 +1691,29 @@ function detectMode(pitchClasses) {
 function pitchToColor(pitchClass, octave, instrument, mode) {
   return pitchToColorAdvanced(pitchClass, octave, instrument || 'piano', { mode });
 }
+
+
+// ============================================================
+// COLOR SPACE UTILITIES (plain JS — no p5, safe anywhere)
+// ============================================================
+
+// HSL (h:0-360, s:0-1, l:0-1) → [r,g,b] 0-255
+function hslToRgb(h, s, l) {
+  const a = s * Math.min(l, 1 - l);
+  const f = (n) => {
+    const k = (n + h / 30) % 12;
+    return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+  };
+  return [Math.round(f(0) * 255), Math.round(f(8) * 255), Math.round(f(4) * 255)];
+}
+
+// HSB (h:0-360, s:0-1, b:0-1) → [r,g,b] 0-255
+function hsbToRgb(h, s, b) {
+  const k = (n) => (n + h / 60) % 6;
+  const f = (n) => b * (1 - s * Math.max(0, Math.min(k(n), 4 - k(n), 1)));
+  return [Math.round(f(5) * 255), Math.round(f(3) * 255), Math.round(f(1) * 255)];
+}
+
 
 // ----------------------------------------------------
 // RESIZE

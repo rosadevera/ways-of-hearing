@@ -143,13 +143,20 @@ function loadCategorySVGs(category) {
   const cat = category || currentCategory;
   const instrumentsToLoad = INSTRUMENTS_BY_CATEGORY[cat] || [];
   for (let instrument of instrumentsToLoad) {
-    if (SHAPE_SVGS[instrument]) continue; // already loaded — don't reload
+    if (SHAPE_SVGS[instrument] && SHAPE_SVGS[instrument].elt) continue; // already loaded — don't reload
     let def = SHAPE_REGISTRY[instrument];
     if (def && def.svg) {
+      const path = def.svg;
       SHAPE_SVGS[instrument] = loadImage(
-        def.svg,
-        () => console.log("Loaded SVG:", instrument),
-        () => { console.log("No SVG for:", instrument); createPlaceholderFor(instrument); }
+        path,
+        (img) => {
+          console.log("✓ SVG loaded:", instrument, path, "dims:", img.width, "x", img.height);
+          SHAPE_SVGS[instrument] = img;
+        },
+        (err) => {
+          console.warn("✗ SVG failed:", instrument, path, err);
+          createPlaceholderFor(instrument);
+        }
       );
     } else {
       createPlaceholderFor(instrument);
@@ -757,19 +764,40 @@ function processKeysCategory(notes, sliceIndex, rms, centroid, flux, chromaArray
     yNorm      = map(i, 0, 11, 0.85, 0.15);
   } else return;
 
-  let instrument = 'piano';
-  if (centroid < 400)       instrument = 'electricorgan';
-  else if (centroid > 2000) instrument = 'xylophone';
+  // Instrument detection within keys category.
+  // The user selected "Keys" so we know we're in that family.
+  // Use spectral centroid + flux + sustained-ness to distinguish character:
+  //   - Very low centroid + sustained → organ-family (slow attack, full harmonics)
+  //   - Low centroid + percussive (high flux) → piano (struck, decays)
+  //   - Mid centroid + sustained → rhodes/keyboard
+  //   - High centroid + short → mallet instruments (xylophone, glockenspiel)
+  //   - Very high centroid → celesta/chime
+  let instrument;
+  const isSustained = flux < 0.05;
+  const isPercussive = flux > 0.08;
+
+  if (centroid < 300 && isSustained)         instrument = 'organ';
+  else if (centroid < 300 && isPercussive)   instrument = 'piano';
+  else if (centroid < 300)                   instrument = 'piano';
+  else if (centroid < 600 && isSustained)    instrument = 'electricorgan';
+  else if (centroid < 600)                   instrument = 'rhodes';
+  else if (centroid < 1000 && isSustained)   instrument = 'keyboard';
+  else if (centroid < 1000)                  instrument = 'mellotron';
+  else if (centroid < 1800 && isSustained)   instrument = 'yamaha';
+  else if (centroid < 1800)                  instrument = 'marimba';
+  else if (centroid < 3000)                  instrument = 'xylophone';
+  else if (centroid < 5000)                  instrument = 'glockenspiel';
+  else                                       instrument = 'celesta';
 
   const confident = rms > 0.008 && flux < 10;
   if (!confident) return;
 
   notes.push({
-    instrument: mapInstrumentName(instrument, 'keys'),
+    instrument: instrument,
     pitchClass, octave,
     yPosition: yNorm,
     slice: sliceIndex,
-    isSustained: rms > 0.01 && flux < 0.05,
+    isSustained: isSustained,
     confidence: 1
   });
 }
@@ -777,18 +805,58 @@ function processKeysCategory(notes, sliceIndex, rms, centroid, flux, chromaArray
 function processPercussionCategory(notes, sliceIndex, rms, zcr, flux, rolloff, avgCentroid) {
   if (rms < 0.02) return;
 
-  let instrument = 'tambourine', yPos = 0.5;
+  // Base y-zones per instrument type — these are ranges, not fixed values.
+  // Low drums sit in the bottom third, cymbals/hats at the top, snare mid-high.
+  let instrument = 'tambourine';
+  let yBase = 0.5, yRange = 0.12; // yRange = how much randomness to add
 
-  if (zcr > 0.15 && flux > 8)              { instrument = 'snare';     yPos = 0.6; }
-  else if (rms > 0.08 && avgCentroid < 200) { instrument = 'bassdrum';  yPos = 0.9; }
-  else if (zcr > 0.1 && flux > 5)          { instrument = 'hihat';     yPos = 0.4; }
-  else if (zcr > 0.2)                      { instrument = 'tambourine'; yPos = 0.3; }
+  if (zcr > 0.15 && flux > 8) {
+    instrument = 'snare';
+    yBase = 0.58; yRange = 0.14; // snare: mid zone, some spread
+  } else if (rms > 0.08 && avgCentroid < 200) {
+    instrument = 'bassdrum';
+    yBase = 0.85; yRange = 0.10; // kick: anchored low, less wander
+  } else if (zcr > 0.1 && flux > 5) {
+    instrument = 'hihat';
+    yBase = 0.22; yRange = 0.18; // hats: high zone, most irregular
+  } else if (zcr > 0.2) {
+    instrument = 'tambourine';
+    yBase = 0.30; yRange = 0.20; // tambourine: floaty, wide range
+  } else if (rms > 0.05 && avgCentroid > 200 && avgCentroid < 600) {
+    instrument = 'toms';
+    yBase = 0.68; yRange = 0.15;
+  } else if (flux > 12) {
+    instrument = 'crashsplash';
+    yBase = 0.15; yRange = 0.12;
+  } else if (zcr > 0.08) {
+    instrument = 'clap';
+    yBase = 0.45; yRange = 0.18;
+  }
+
+  // Seed a deterministic-ish jitter from sliceIndex + rms so it's
+  // consistent on redraw but not a perfect grid.
+  // Uses a simple pseudo-random from the values we already have.
+  const jitterSeed = ((sliceIndex * 7.3 + rms * 100) % 1.0);
+  const jitter2    = ((sliceIndex * 3.7 + zcr * 50)  % 1.0);
+
+  // y: base zone ± yRange, driven by rms intensity (louder = pushed further)
+  const yPos = Math.min(0.97, Math.max(0.03,
+    yBase + (jitterSeed - 0.5) * yRange * 2 + (rms - 0.05) * 0.15
+  ));
+
+  // Sub-slice x offset: nudge within the slice cell so hits don't all
+  // snap to exact subdivision boundaries
+  const sliceOffset = (jitter2 - 0.5) * 0.6; // ±0.3 subdivisions
+
+  // Size scales with hit intensity (rms) — louder hits draw bigger
+  const sizeScale = 0.7 + Math.min(rms * 4, 1.2); // 0.7→1.9 range
 
   notes.push({
     instrument: mapInstrumentName(instrument, 'percussion'),
-    yPosition: yPos,
-    slice: sliceIndex,
-    intensity: rms
+    yPosition:  yPos,
+    slice:      sliceIndex + sliceOffset,
+    intensity:  rms,
+    sizeScale:  sizeScale,
   });
 }
 
@@ -809,10 +877,18 @@ function processWindCategory(notes, sliceIndex, rms, centroid, flux, chromaArray
     yNorm      = map(centroid, 200, 4000, 0.85, 0.15, true);
   } else return;
 
-  const instrument = centroid > 1200 ? 'trumpet' : 'flute';
+  // Wind instrument detection by centroid (frequency brightness) + flux
+  let instrument;
+  if      (centroid < 400)                     instrument = 'bassoon';
+  else if (centroid < 700  && flux < 0.04)     instrument = 'oboe';
+  else if (centroid < 700)                     instrument = 'clarinet';
+  else if (centroid < 1200 && flux < 0.04)     instrument = 'recorder';
+  else if (centroid < 1200)                    instrument = 'flute';
+  else if (centroid < 2000)                    instrument = 'trumpet';
+  else                                         instrument = 'piccolo';
 
   notes.push({
-    instrument: mapInstrumentName(instrument, 'wind'),
+    instrument: instrument,
     pitchClass, octave,
     yPosition: yNorm,
     slice: sliceIndex,
@@ -837,10 +913,18 @@ function processStringsCategory(notes, sliceIndex, rms, centroid, flux, zcr, chr
     yNorm      = map(centroid, 200, 4000, 0.85, 0.15, true);
   } else return;
 
-  let instrument = 'violin';
-  if (centroid < 400)      instrument = 'electricbass';
-  else if (centroid < 800) instrument = 'cello';
-  else                     instrument = (zcr > 0.15 ? 'electricguitar' : 'acousticguitar');
+  // Strings detection by centroid + ZCR (zero crossing rate indicates pluck vs bow).
+  // Centroid thresholds are deliberately wide — real guitar/violin audio
+  // typically sits 300–3000 Hz depending on register and playing style.
+  let instrument;
+  if      (centroid < 300)                      instrument = 'electricbass';
+  else if (centroid < 550)                      instrument = 'bass';
+  else if (centroid < 900  && zcr < 0.08)       instrument = 'cello';
+  else if (centroid < 900)                      instrument = 'acousticguitar';
+  else if (centroid < 1400 && zcr < 0.08)       instrument = 'viola';
+  else if (centroid < 1400)                     instrument = 'electricguitar';
+  else if (centroid < 2800 && zcr < 0.12)       instrument = 'violin';
+  else                                          instrument = 'electricguitar';
 
   notes.push({
     instrument: mapInstrumentName(instrument, 'strings'),
@@ -860,27 +944,37 @@ function processSynthsCategory(notes, sliceIndex, rms, centroid, sharpness, flux
     : (flux < 0.01)     ? 'pad'
     : 'synth';
 
-  let yNorm = map(centroid, 200, 4000, 0.85, 0.15, true);
+  // Each note tracks its first + last slice so we can size bandHeight by duration.
+  // sliceStart = when this pitch was first heard in the measure.
+  // On each subsequent slice, drawMeasureNotes will extend sliceEnd.
+
   let pitchClass = 'C', octave = mapToOctave(centroid);
+  let yNorm = map(centroid, 200, 4000, 0.85, 0.15, true);
 
   if (pitchHz) {
     const midi = freqToMidi(pitchHz);
-    pitchClass = midiToPitchClass(midi);
-    octave     = midiToOctave(midi);
-    yNorm      = freqToYNorm(pitchHz);
+    pitchClass  = midiToPitchClass(midi);
+    octave      = midiToOctave(midi);
+    // y: high pitch → top (low yNorm), low pitch → bottom (high yNorm)
+    yNorm = freqToYNorm(pitchHz);
   } else if (chromaArray && chromaArray.length) {
     const chromaAvg = averageChroma(chromaArray);
-    pitchClass = dominantPitch(chromaAvg);
+    const sorted    = chromaAvg.map((v,i) => ({v,i})).sort((a,b) => b.v - a.v);
+    pitchClass = indexToPitch(sorted[0].i);
+    octave     = mapToOctave(centroid);
+    // y mapped from chromatic index: C(0)=bottom, B(11)=top
+    yNorm = map(sorted[0].i, 0, 11, 0.85, 0.15);
   }
 
   notes.push({
     instrument: synthType,
     pitchClass, octave,
-    yPosition: yNorm,
-    slice: sliceIndex,
-    isSustained: flux < 0.02,
-    intensity: sharpness || 1,
-    bandHeight: map(rms, 0, 0.3, 0.12, 0.28, true)
+    yPosition:   yNorm,
+    slice:        sliceIndex,  // first slice this pitch appeared
+    sliceEnd:     sliceIndex,  // will be extended in drawMeasureNotes merging
+    isSustained:  flux < 0.02,
+    intensity:    rms,         // use rms not sharpness for band height
+    bandHeight:   null,        // computed at draw time from duration
   });
 }
 
@@ -1056,10 +1150,13 @@ function midiToPitchClass(midi) {
 function midiToOctave(midi) { return Math.floor(Math.round(midi) / 12) - 1; }
 
 function freqToYNorm(freq) {
-  const fMin = 80, fMax = 1200;
+  // Range covers full orchestral string span:
+  // 40 Hz (low bass) → 4000 Hz (top of violin/guitar harmonics)
+  // Log scale so mid-range pitches spread across the grid naturally.
+  const fMin = 40, fMax = 4000;
   const f = Math.max(fMin, Math.min(fMax, freq));
   const t = (Math.log(f) - Math.log(fMin)) / (Math.log(fMax) - Math.log(fMin));
-  return 1 - t;
+  return 1 - t; // high freq = low yNorm = top of grid
 }
 
 // ----------------------------------------------------
@@ -1144,16 +1241,48 @@ function drawMeasureNotes(measure, x, y, size, isCurrent = false) {
   const isSynthMeasure = measure.category === 'synths';
 
   if (isSynthMeasure) {
-    let synthNotes = [...measure.notes];
-    if (synthNotes.length > 3) {
-      synthNotes.sort((a, b) => (a.yPosition || 0.5) - (b.yPosition || 0.5));
-      const lo  = synthNotes[0];
-      const hi  = synthNotes[synthNotes.length - 1];
-      const mid = synthNotes[Math.floor(synthNotes.length / 2)];
-      synthNotes = [lo, mid, hi];
+    // Merge slices by pitch class → one representative note per pitch.
+    // Track earliest slice and latest slice so we can measure duration.
+    const byPitch = {};
+    for (const note of measure.notes) {
+      const key = note.pitchClass || 'X';
+      if (!byPitch[key]) {
+        byPitch[key] = { ...note, sliceStart: note.slice, sliceEnd: note.slice, totalRms: note.intensity || 0, count: 1 };
+      } else {
+        const e = byPitch[key];
+        e.sliceStart = Math.min(e.sliceStart, note.slice);
+        e.sliceEnd   = Math.max(e.sliceEnd,   note.slice);
+        e.totalRms  += note.intensity || 0;
+        e.count++;
+        // Keep the color/yPosition from the loudest (highest rms) slice
+        if ((note.intensity || 0) > (e.intensity || 0)) {
+          e.color      = note.color;
+          e.colorRight = note.colorRight;
+          e.yPosition  = note.yPosition;
+          e.intensity  = note.intensity;
+        }
+      }
     }
+
+    let synthNotes = Object.values(byPitch);
+
+    // Cap at 3 bands. If more pitches exist, keep the 3 loudest.
+    if (synthNotes.length > 3) {
+      synthNotes.sort((a, b) => (b.totalRms || 0) - (a.totalRms || 0));
+      synthNotes = synthNotes.slice(0, 3);
+    }
+
+    // Compute bandHeight from duration:
+    // Full measure (slices 0-7) = 0.30 of cell height.
+    // Single slice = 0.08. Linear scale between.
+    for (const note of synthNotes) {
+      const dur = (note.sliceEnd - note.sliceStart + 1) / SUBDIVISIONS; // 0→1
+      note.bandHeight = 0.08 + dur * (0.30 - 0.08);
+    }
+
+    // Paint bottom-to-top (high yPosition = bottom of canvas)
     synthNotes.sort((a, b) => (b.yPosition || 0.5) - (a.yPosition || 0.5));
-    for (let note of synthNotes) drawSynthBlock(note, size);
+    for (const note of synthNotes) drawSynthBlock(note, size);
   } else {
     let notes = [...measure.notes];
     notes.sort((a, b) => (a.yPosition || 0.5) - (b.yPosition || 0.5));
@@ -1195,17 +1324,36 @@ function resolveNoteColor(note) {
 function drawSynthBlock(note, size) {
   if (!note.color) return;
 
-  // Lerp in RGB space — avoids HSB lerpColor sweeping through the hue wheel.
-  // e.g. lerping purple→green in HSB goes through blue/cyan/teal = rainbow.
-  // RGB lerp goes directly between the two colors with no hue detour.
-  const cL_hsb = note.color;
-  const cR_hsb = note.colorRight || { h: (cL_hsb.h + 20) % 360, s: cL_hsb.s, b: cL_hsb.b };
+  const raw = note.color; // {h, s, b} — may be darkened by octave modifiers
+
+  // Lift color back to palette-level vibrancy.
+  // pitchToColorAdvanced applies octave darkening which looks fine for shapes
+  // but kills synth bands. We restore s/b to match the palette swatch directly.
+  const cL_hsb = {
+    h: raw.h,
+    s: clampVal(raw.s + 18, 55, 100), // restore saturation
+    b: clampVal(raw.b + 20, 65, 98),  // restore brightness — match swatch
+  };
+
+  // Right-edge: shift hue meaningfully based on pitch semitone.
+  // Lower pitches sweep warm (+55–80°), upper pitches sweep cool (+85–110°).
+  // This gives each band a real visible hue change that reflects pitch character.
+  const pitchSemi = PITCH_TO_SEMITONE[note.pitchClass] ?? 0;
+  const hueShift  = pitchSemi < 6
+    ? 55 + pitchSemi * 5           // C→F:  +55° → +80° warm sweep
+    : 85 + (pitchSemi - 6) * 4;   // F#→B: +85° → +105° cool sweep
+
+  const cR_hsb = {
+    h: (cL_hsb.h + hueShift + 360) % 360,
+    s: clampVal(cL_hsb.s - 5,  50, 100), // very slightly less sat at right
+    b: clampVal(cL_hsb.b - 18, 45, 100), // darker right edge = visual depth
+  };
 
   const [r1, g1, b1] = hsbToRgb(cL_hsb.h, cL_hsb.s / 100, cL_hsb.b / 100);
   const [r2, g2, b2] = hsbToRgb(cR_hsb.h, cR_hsb.s / 100, cR_hsb.b / 100);
 
-  const yCenter   = constrain((note.yPosition || 0.5) * size, size * 0.05, size * 0.95);
-  const bandH     = (note.bandHeight || 0.08) * size;
+  const yCenter   = constrain((note.yPosition || 0.5) * size, size * 0.04, size * 0.96);
+  const bandH     = (note.bandHeight || 0.12) * size;
   const halfBandH = bandH / 2;
   const yTop      = yCenter - halfBandH;
   const yBottom   = yCenter + halfBandH;
@@ -1249,71 +1397,202 @@ function drawNote(note, size, noteIndex, totalNotes) {
   // Resolve {h,s,b} → p5 color inside draw()
   const noteColor = resolveNoteColor(note);
 
-  // Larger base size for better visibility; strings slightly bigger when sustained
-  const baseSize = size * 0.16;
-  let shapeSize  = baseSize;
-  if (def.stringInstrument) shapeSize = note.plucked ? baseSize * 0.75 : baseSize * 1.1;
+  // Larger base size for better visibility; strings slightly bigger when sustained.
+  // Percussion uses sizeScale (driven by hit intensity) for organic variation.
+  const baseSize = size * 0.08;
+  // Scale 1× (quiet) → 2.5× (loud) based on RMS intensity.
+  // RMS typically ranges 0–0.3 in practice; clamp and normalise to 0–1.
+  const intensityNorm = Math.min(1, (note.intensity || note.sizeScale || 0.05) / 0.25);
+  const scaleMult     = 1.0 + intensityNorm * 1.5; // 1.0 → 2.5
+  let shapeSize  = baseSize * scaleMult;
+  if (def.stringInstrument) shapeSize = note.plucked ? shapeSize * 0.75 : shapeSize * 1.1;
 
   drawInstrumentShape(note.instrument, x, y, shapeSize, noteColor);
-
-  if (def.elongated) {
-    // Draw a connecting line for ALL elongated instruments — not just sustained ones.
-    // This creates the musical staff-like visual language across the cell.
-    const c = resolveNoteColor(note);
-    const lineAlpha = note.isSustained ? 220 : 110; // sustained = solid, plucked = faint
-    stroke(hue(c), saturation(c), brightness(c), lineAlpha);
-    strokeWeight(note.isSustained ? 2 : 1);
-    strokeCap(ROUND);
-    line(0, y, size, y); // full edge-to-edge
-    noStroke();
-  }
 }
 
 function drawInstrumentShape(instrument, x, y, size, col) {
   const img = SHAPE_SVGS[instrument];
-  if (img && img.width > 0 && img.height > 0) {
+  // p5 loaded SVGs sometimes report width=0 even when valid.
+  // Check for the elt property (p5.Element from loadImage) OR non-zero dims.
+  const isSVGLoaded = img && (img.elt || (img.width > 0 && img.height > 0));
+  if (isSVGLoaded) {
     push();
     imageMode(CENTER);
     tint(hue(col), saturation(col), brightness(col), 255);
     image(img, x, y, size, size);
     pop();
-  } else {
-    push();
-    noStroke();
-    fill(col);
-    if (instrument.includes('piano') || instrument.includes('organ') || instrument.includes('key')) {
-      rect(x - size/2, y - size/3, size, size * 0.66, 3);
-    } else if (instrument.includes('violin') || instrument.includes('cello') || instrument.includes('string')) {
-      ellipse(x, y, size * 0.8, size * 0.4);
-    } else if (instrument.includes('trumpet') || instrument.includes('sax') || instrument.includes('horn')) {
-      ellipse(x, y, size * 0.6, size * 0.9);
-      rect(x - size/4, y - size/2, size/2, size);
-    } else if (instrument.includes('flute')) {
-      rect(x - size/3, y - size/6, size * 0.66, size * 0.33, 5);
-    } else if (instrument.includes('kick') || instrument.includes('drum')) {
-      ellipse(x, y, size, size);
-    } else if (instrument.includes('snare')) {
-      stroke(col); strokeWeight(size * 0.08);
-      line(x - size/2, y - size/2, x + size/2, y + size/2);
-      line(x + size/2, y - size/2, x - size/2, y + size/2);
-      noStroke();
-    } else if (instrument.includes('hihat') || instrument.includes('cymbal')) {
-      stroke(col); strokeWeight(1);
-      ellipse(x, y, size * 0.8, size * 0.8);
-      line(x - size/2, y, x + size/2, y);
-      line(x, y - size/2, x, y + size/2);
-      noStroke();
-    } else if (instrument.includes('bass') && !instrument.includes('bass_synth')) {
-      triangle(x, y - size/2, x - size/2, y + size/2, x + size/2, y + size/2);
-    } else if (instrument.includes('guitar')) {
-      ellipse(x, y, size * 0.7, size * 0.5);
-    } else if (instrument.includes('synth') || instrument.includes('pad') || instrument.includes('lead')) {
-      rect(x - size/2, y - size/2, size, size, 2);
-    } else {
-      ellipse(x, y, size, size);
-    }
-    pop();
+    return;
   }
+
+  // ── Fallback geometric shapes — one distinct shape per instrument ──────────
+  push();
+  fill(col);
+  noStroke();
+  const h = hue(col), s = saturation(col), b = brightness(col);
+  const s2 = size / 2;
+  const s3 = size / 3;
+  const s4 = size / 4;
+
+  // KEYS
+  if (instrument === 'piano' || instrument === 'keyboard' || instrument === 'yamaha') {
+    // Row of piano keys — wide rect with thin vertical dividers
+    rect(x - s2, y - size * 0.18, size, size * 0.36, 2);
+    stroke(col); strokeWeight(0.5);
+    for (let i = 1; i < 5; i++) line(x - s2 + (size/5)*i, y - size*0.18, x - s2 + (size/5)*i, y + size*0.18);
+    noStroke();
+  } else if (instrument === 'organ' || instrument === 'electricorgan' || instrument === 'rhodes' || instrument === 'mellotron') {
+    // Taller stacked rectangles (drawbars)
+    rect(x - s2, y - size*0.22, size, size*0.12, 1);
+    rect(x - s2, y - size*0.06, size, size*0.12, 1);
+    rect(x - s2, y + size*0.10, size, size*0.12, 1);
+  } else if (instrument === 'xylophone' || instrument === 'marimba' || instrument === 'glockenspiel') {
+    // Descending bars like a mallet instrument
+    const barW = size * 0.13;
+    const heights = [0.45, 0.38, 0.32, 0.27, 0.22];
+    for (let i = 0; i < 5; i++) {
+      const bx = x - s2 + (size/5)*i + barW*0.1;
+      rect(bx, y - heights[i]*size, barW*0.8, heights[i]*2*size, 2);
+    }
+  } else if (instrument === 'celesta' || instrument === 'tubularbells' || instrument === 'chime') {
+    // Vertical tubes
+    for (let i = 0; i < 4; i++) {
+      const bx = x - size*0.3 + i * size*0.2;
+      const bh = size * (0.3 + i * 0.05);
+      rect(bx, y - bh, size*0.08, bh*2, 4);
+    }
+  } else if (instrument === 'stylophone' || instrument === 'melodica') {
+    // Small rounded rect
+    rect(x - size*0.4, y - size*0.15, size*0.8, size*0.3, 5);
+    stroke(col); strokeWeight(0.5);
+    for (let i = 1; i < 6; i++) line(x - size*0.4 + (size*0.8/6)*i, y - size*0.15, x - size*0.4 + (size*0.8/6)*i, y + size*0.15);
+    noStroke();
+
+  // PERCUSSION
+  } else if (instrument === 'kick' || instrument === 'bassdrum') {
+    // Large filled circle
+    ellipse(x, y, size, size);
+    stroke(col); strokeWeight(size * 0.06);
+    ellipse(x, y, size * 0.55, size * 0.55);
+    noStroke();
+  } else if (instrument === 'snare') {
+    // Shallow cylinder — wide flat ellipse
+    ellipse(x, y, size, size * 0.38);
+    stroke(col); strokeWeight(size * 0.05);
+    line(x - s2*0.7, y, x + s2*0.7, y); // snare wires
+    noStroke();
+  } else if (instrument === 'toms') {
+    // Medium circle, slightly smaller than kick
+    ellipse(x, y, size * 0.82, size * 0.82);
+  } else if (instrument === 'hihat') {
+    // Two stacked thin ellipses (cymbals)
+    ellipse(x, y - size*0.08, size * 0.88, size * 0.14);
+    ellipse(x, y + size*0.08, size * 0.88, size * 0.14);
+  } else if (instrument === 'crashsplash') {
+    // Single wide thin ellipse, slight tilt
+    push(); rotate(0.15);
+    ellipse(x, y, size * 1.0, size * 0.1);
+    pop();
+  } else if (instrument === 'tambourine') {
+    // Circle with small dots around edge
+    noFill(); stroke(col); strokeWeight(size * 0.06);
+    ellipse(x, y, size * 0.7, size * 0.7);
+    noStroke(); fill(col);
+    for (let i = 0; i < 6; i++) {
+      const a = (TWO_PI / 6) * i;
+      ellipse(x + cos(a) * s2 * 0.85, y + sin(a) * s2 * 0.85, size*0.12, size*0.12);
+    }
+  } else if (instrument === 'clap') {
+    // Two mirrored hand shapes — two half-ellipses
+    arc(x - size*0.05, y, size*0.6, size*0.5, PI*0.5, PI*1.5);
+    arc(x + size*0.05, y, size*0.6, size*0.5, -PI*0.5, PI*0.5);
+
+  // WIND
+  } else if (instrument === 'flute' || instrument === 'piccolo' || instrument === 'recorder') {
+    // Long thin horizontal tube
+    rect(x - s2, y - size*0.07, size, size*0.14, size*0.07);
+    // Finger holes
+    fill(0, 0, 100, 180);
+    for (let i = 0; i < 4; i++) ellipse(x - size*0.25 + i*size*0.14, y, size*0.06, size*0.06);
+  } else if (instrument === 'whistle') {
+    // Short wide cylinder
+    rect(x - size*0.3, y - size*0.1, size*0.6, size*0.2, size*0.1);
+  } else if (instrument === 'clarinet' || instrument === 'oboe') {
+    // Tapered vertical tube — trapezoid
+    fill(col);
+    quad(x - size*0.06, y - s2,
+         x + size*0.06, y - s2,
+         x + size*0.12, y + s2,
+         x - size*0.12, y + s2);
+  } else if (instrument === 'bassoon') {
+    // Double tube (U-shape) — two rects close together
+    rect(x - size*0.16, y - s2, size*0.1, size, 3);
+    rect(x + size*0.06, y - s2, size*0.1, size, 3);
+  } else if (instrument === 'trumpet') {
+    // Bell shape — narrow left, wide right
+    fill(col);
+    beginShape();
+    vertex(x - s2, y - size*0.06);
+    vertex(x + size*0.1, y - size*0.06);
+    bezierVertex(x + size*0.3, y - size*0.06, x + s2, y - size*0.22, x + s2, y - size*0.22);
+    vertex(x + s2, y + size*0.22);
+    bezierVertex(x + s2, y + size*0.22, x + size*0.3, y + size*0.06, x + size*0.1, y + size*0.06);
+    vertex(x - s2, y + size*0.06);
+    endShape(CLOSE);
+
+  // STRINGS
+  } else if (instrument === 'violin' || instrument === 'viola') {
+    // Figure-8 body
+    ellipse(x, y - size*0.22, size*0.52, size*0.44);
+    ellipse(x, y + size*0.22, size*0.60, size*0.48);
+    // Waist cutout
+    fill(0, 0, 100);
+    ellipse(x - size*0.28, y, size*0.14, size*0.22);
+    ellipse(x + size*0.28, y, size*0.14, size*0.22);
+  } else if (instrument === 'cello') {
+    // Larger figure-8
+    fill(col);
+    ellipse(x, y - size*0.24, size*0.58, size*0.50);
+    ellipse(x, y + size*0.24, size*0.66, size*0.54);
+    fill(0, 0, 100);
+    ellipse(x - size*0.30, y, size*0.14, size*0.24);
+    ellipse(x + size*0.30, y, size*0.14, size*0.24);
+  } else if (instrument === 'acousticguitar') {
+    // Classic guitar body — two unequal ellipses
+    fill(col);
+    ellipse(x, y - size*0.18, size*0.50, size*0.40);
+    ellipse(x, y + size*0.20, size*0.62, size*0.46);
+    fill(0, 0, 100, 160);
+    ellipse(x, y + size*0.08, size*0.2, size*0.2); // soundhole
+  } else if (instrument === 'electricguitar') {
+    // Asymmetric solid body — simplified offset double-cutaway
+    fill(col);
+    beginShape();
+    vertex(x - size*0.3, y - s2);
+    vertex(x + size*0.2, y - s2);
+    vertex(x + s2,       y - size*0.1);
+    vertex(x + s2,       y + size*0.35);
+    vertex(x + size*0.1, y + s2);
+    vertex(x - size*0.35,y + s2);
+    vertex(x - s2,       y + size*0.15);
+    endShape(CLOSE);
+  } else if (instrument === 'bass' || instrument === 'electricbass') {
+    // Longer body, offset upper horn
+    fill(col);
+    beginShape();
+    vertex(x - size*0.25, y - s2);
+    vertex(x + size*0.1,  y - s2);
+    vertex(x + s2,        y - size*0.05);
+    vertex(x + s2,        y + size*0.4);
+    vertex(x,             y + s2);
+    vertex(x - s2,        y + size*0.2);
+    endShape(CLOSE);
+
+  // DEFAULT
+  } else {
+    ellipse(x, y, size, size);
+  }
+
+  pop();
 }
 
 function drawLoadingOverlay() {
@@ -1363,7 +1642,7 @@ function resolveEnharmonic(p) { return ENHARMONIC[p] || p; }
 const MODAL_MODIFIERS = {
   ionian:    { h: +12, s: +15, b:  +8 },
   mixolydian:{ h:  +8, s: +12, b:  +5 },
-  lydian:    { h: +18, s: +18, b: +12 },
+  lydian:    { h: +12, s:  +8, b:  +4 },
   dorian:    { h:  -5, s:  +8, b:  +2 },
   aeolian:   { h: -12, s:  -5, b:  -5 },
   phrygian:  { h: -20, s: -10, b: -10 },
@@ -1510,15 +1789,15 @@ function getSynthGradientRight(pitchClass, octave, instrument, options = {}) {
 const DESIGNER_PALETTE_SETS = {
 
   ionian: [
-    // "Vintage Warmth" — terracotta, wheat, sage
-    [{ h:18,s:68,b:84 }, { h:32,s:58,b:90 }, { h:42,s:50,b:94 },
-     { h:88,s:45,b:74 }, { h:24,s:72,b:78 }, { h:50,s:52,b:88 }, { h:14,s:62,b:82 }],
-    // "Warm Linen" — cream, rust, olive, dusty rose
-    [{ h:36,s:55,b:96 }, { h:12,s:70,b:82 }, { h:75,s:52,b:70 },
-     { h:340,s:42,b:84 }, { h:25,s:65,b:90 }, { h:60,s:45,b:80 }, { h:8,s:60,b:86 }],
-    // "Desert Sand" — sand, burnt sienna, muted gold
-    [{ h:40,s:62,b:91 }, { h:20,s:75,b:74 }, { h:55,s:55,b:87 },
-     { h:15,s:70,b:80 }, { h:35,s:50,b:93 }, { h:28,s:66,b:82 }, { h:48,s:48,b:89 }],
+    // "Vintage Warmth" — terracotta, wheat, sage — grounded
+    [{ h:18,s:65,b:76 }, { h:32,s:55,b:82 }, { h:42,s:48,b:86 },
+     { h:88,s:42,b:66 }, { h:24,s:68,b:72 }, { h:50,s:48,b:80 }, { h:14,s:58,b:74 }],
+    // "Warm Linen" — rust, olive, dusty rose — muted
+    [{ h:36,s:50,b:86 }, { h:12,s:65,b:74 }, { h:75,s:48,b:64 },
+     { h:340,s:38,b:76 }, { h:25,s:60,b:82 }, { h:60,s:42,b:72 }, { h:8,s:55,b:78 }],
+    // "Desert Sand" — sand, burnt sienna, muted gold — warm but not bright
+    [{ h:40,s:58,b:82 }, { h:20,s:70,b:68 }, { h:55,s:52,b:78 },
+     { h:15,s:65,b:72 }, { h:35,s:46,b:84 }, { h:28,s:62,b:75 }, { h:48,s:44,b:80 }],
   ],
 
   mixolydian: [
@@ -1534,15 +1813,15 @@ const DESIGNER_PALETTE_SETS = {
   ],
 
   lydian: [
-    // "Morning Mist" — soft lavender, sky, warm white
-    [{ h:220,s:45,b:92 }, { h:195,s:42,b:95 }, { h:260,s:35,b:88 },
-     { h:180,s:38,b:90 }, { h:240,s:42,b:85 }, { h:210,s:32,b:96 }, { h:270,s:30,b:90 }],
-    // "Pale Botanica" — blush, sage, sky
-    [{ h:340,s:35,b:95 }, { h:95,s:42,b:82 }, { h:200,s:45,b:90 },
-     { h:355,s:28,b:93 }, { h:110,s:36,b:78 }, { h:215,s:38,b:88 }, { h:350,s:32,b:96 }],
-    // "Nordic Light" — ice blue, pale gold, silver
-    [{ h:205,s:42,b:94 }, { h:48,s:44,b:96 }, { h:195,s:36,b:90 },
-     { h:55,s:38,b:92 }, { h:210,s:48,b:88 }, { h:42,s:40,b:94 }, { h:200,s:30,b:96 }],
+    // "Periwinkle Dusk" — medium blue-violet, warm gold, deeper sky
+    [{ h:225,s:58,b:78 }, { h:205,s:52,b:82 }, { h:265,s:48,b:72 },
+     { h:188,s:50,b:76 }, { h:245,s:55,b:68 }, { h:215,s:45,b:84 }, { h:275,s:42,b:70 }],
+    // "Dusty Botanica" — muted rose, sage, grounded sky
+    [{ h:340,s:48,b:80 }, { h:95,s:55,b:68 }, { h:200,s:58,b:75 },
+     { h:352,s:42,b:76 }, { h:108,s:48,b:64 }, { h:212,s:52,b:72 }, { h:348,s:45,b:82 }],
+    // "Nordic Dusk" — steel blue, amber, slate
+    [{ h:208,s:55,b:76 }, { h:42,s:60,b:82 }, { h:198,s:48,b:72 },
+     { h:50,s:52,b:78 }, { h:215,s:62,b:70 }, { h:38,s:55,b:80 }, { h:202,s:45,b:74 }],
   ],
 
   dorian: [
